@@ -14,7 +14,7 @@ use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{
     self, cell::Cell, test::TermSize, viewport_to_point, Term, TermMode,
 };
-use alacritty_terminal::{tty, Grid};
+use alacritty_terminal::tty;
 use iced::keyboard::Modifiers;
 use iced_core::Size;
 use std::borrow::Cow;
@@ -171,7 +171,8 @@ impl Backend {
         let cursor = term.grid_mut().cursor_cell().clone();
 
         let initial_content = RenderableContent {
-            grid: term.grid().clone(),
+            display_offset: 0,
+            cursor_point: term.grid().cursor.point,
             selectable_range: None,
             terminal_mode: *term.mode(),
             terminal_size,
@@ -280,13 +281,16 @@ impl Backend {
             let start = range.start();
             let end = range.end();
 
-            let mut url = String::from(self.last_content.grid.index(*start).c);
-            for indexed in self.last_content.grid.iter_from(*start) {
+            let term = self.term.lock();
+            let grid = term.grid();
+            let mut url = String::from(grid.index(*start).c);
+            for indexed in grid.iter_from(*start) {
                 url.push(indexed.c);
                 if indexed.point == *end {
                     break;
                 }
             }
+            drop(term);
 
             let _ = open::that(url);
         }
@@ -499,13 +503,17 @@ impl Backend {
                 + Self::mouse_modifier_bits(modifiers);
             for _ in 0..delta_value.unsigned_abs() {
                 match MouseMode::from(mode) {
-                    MouseMode::Sgr => self.sgr_mouse_report(point, button, true),
+                    MouseMode::Sgr => {
+                        self.sgr_mouse_report(point, button, true)
+                    },
                     MouseMode::Normal(is_utf8) => {
                         self.normal_mouse_report(point, button, is_utf8)
                     },
                 }
             }
-        } else if mode.contains(TermMode::ALTERNATE_SCROLL | TermMode::ALT_SCREEN) {
+        } else if mode
+            .contains(TermMode::ALTERNATE_SCROLL | TermMode::ALT_SCREEN)
+        {
             let line_cmd = if delta_value > 0 { b'A' } else { b'B' };
             let mut content = vec![];
             for _ in 0..delta_value.abs() {
@@ -513,21 +521,24 @@ impl Backend {
             }
             self.notifier.notify(content);
         } else {
-            terminal.grid_mut().scroll_display(Scroll::Delta(delta_value));
+            terminal
+                .grid_mut()
+                .scroll_display(Scroll::Delta(delta_value));
         }
     }
 
     pub fn selectable_content(&self) -> String {
-        let content = self.renderable_content();
-        let mut result = String::new();
-        if let Some(range) = content.selectable_range {
-            for indexed in content.grid.display_iter() {
-                if range.contains(indexed.point) {
-                    result.push(indexed.c);
-                }
-            }
-        }
-        result
+        self.term.lock().selection_to_string().unwrap_or_default()
+    }
+
+    /// Run `f` with the live terminal state, under its lock.
+    /// Drawing reads the grid here instead of keeping a full copy of it
+    /// (with scrollback) on every PTY event.
+    pub(crate) fn with_term<R>(
+        &self,
+        f: impl FnOnce(&Term<EventProxy>) -> R,
+    ) -> R {
+        f(&self.term.lock())
     }
 
     pub fn sync(&mut self) {
@@ -543,7 +554,8 @@ impl Backend {
         };
 
         let cursor = terminal.grid_mut().cursor_cell().clone();
-        self.last_content.grid = terminal.grid().clone();
+        self.last_content.display_offset = terminal.grid().display_offset();
+        self.last_content.cursor_point = terminal.grid().cursor.point;
         self.last_content.selectable_range = selectable_range;
         self.last_content.cursor = cursor.clone();
         self.last_content.terminal_mode = *terminal.mode();
@@ -587,8 +599,11 @@ fn visible_regex_match_iter<'a>(
         .take_while(move |rm| rm.start().line <= viewport_end)
 }
 
+/// Small, cheap snapshot of the terminal state used for input handling.
+/// The grid itself is not copied; drawing reads it via `Backend::with_term`.
 pub struct RenderableContent {
-    pub grid: Grid<Cell>,
+    pub display_offset: usize,
+    pub cursor_point: Point,
     pub hovered_hyperlink: Option<RangeInclusive<Point>>,
     pub selectable_range: Option<SelectionRange>,
     pub cursor: Cell,
@@ -599,7 +614,8 @@ pub struct RenderableContent {
 impl Default for RenderableContent {
     fn default() -> Self {
         Self {
-            grid: Grid::new(0, 0, 0),
+            display_offset: 0,
+            cursor_point: Point::default(),
             hovered_hyperlink: None,
             selectable_range: None,
             cursor: Cell::default(),
@@ -659,7 +675,10 @@ mod tests {
             if backend.renderable_content().terminal_mode.contains(mode) {
                 return;
             }
-            assert!(start.elapsed() < Duration::from_secs(5), "mode {mode:?} never set");
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "mode {mode:?} never set"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -675,6 +694,69 @@ mod tests {
         }
     }
 
+    /// Copy reads the selection from the live terminal (no grid copy kept).
+    #[test]
+    fn selection_copies_text_from_live_grid() {
+        let (tx, mut rx) = mpsc::channel(100);
+        std::thread::spawn(move || while rx.blocking_recv().is_some() {});
+        let settings = BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf 'hello world'; sleep 30".into()],
+            ..Default::default()
+        };
+        let mut backend = Backend::new(0, tx, settings).unwrap();
+        backend.handle(Command::Resize(
+            Some(Size::new(800.0, 400.0)),
+            Some(Size::new(10.0, 20.0)),
+        ));
+        let start = Instant::now();
+        loop {
+            backend.handle(Command::SelectStart(
+                SelectionType::Simple,
+                (0.0, 5.0),
+            ));
+            backend.handle(Command::SelectUpdate((109.0, 5.0)));
+            if backend.selectable_content() == "hello world" {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "got {:?}",
+                backend.selectable_content()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Not a pass/fail test: prints the cost of one sync with a full scrollback.
+    /// Run: cargo test --release -p codemux-terminal sync_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn sync_cost() {
+        let (tx, mut rx) = mpsc::channel(100);
+        std::thread::spawn(move || while rx.blocking_recv().is_some() {});
+        let settings = BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "seq 1 20000; sleep 30".into()],
+            ..Default::default()
+        };
+        let mut backend = Backend::new(0, tx, settings).unwrap();
+        backend.handle(Command::Resize(
+            Some(Size::new(2000.0, 1200.0)),
+            Some(Size::new(10.0, 20.0)),
+        ));
+        std::thread::sleep(Duration::from_secs(2));
+        let n = 300;
+        let start = Instant::now();
+        for _ in 0..n {
+            backend.sync();
+        }
+        eprintln!(
+            "SYNC_COST {:.3} ms each",
+            start.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
+    }
+
     /// T3: with SGR mouse mode on (like Claude Code), the wheel must be reported
     /// as buttons 64 (up) / 65 (down) at the mouse cell, not turned into arrow keys.
     #[test]
@@ -682,9 +764,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("input.bin");
         // 1000 = mouse, 1006 = SGR, 1049 = alt screen, 1007 = alternate scroll.
-        let mut backend =
-            start_recorder(r"\033[?1049h\033[?1007h\033[?1000h\033[?1006h", &out);
-        wait_for_mode(&mut backend, TermMode::SGR_MOUSE | TermMode::MOUSE_REPORT_CLICK);
+        let mut backend = start_recorder(
+            r"\033[?1049h\033[?1007h\033[?1000h\033[?1006h",
+            &out,
+        );
+        wait_for_mode(
+            &mut backend,
+            TermMode::SGR_MOUSE | TermMode::MOUSE_REPORT_CLICK,
+        );
 
         let at = Point::new(Line(24), Column(8));
         backend.handle(Command::Scroll(2, at, Modifiers::empty()));
@@ -703,7 +790,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("input.bin");
         let mut backend = start_recorder(r"\033[?1049h\033[?1007h", &out);
-        wait_for_mode(&mut backend, TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
+        wait_for_mode(
+            &mut backend,
+            TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL,
+        );
 
         let at = Point::new(Line(0), Column(0));
         backend.handle(Command::Scroll(1, at, Modifiers::empty()));
@@ -721,7 +811,11 @@ mod tests {
         let mut backend = start_recorder(r"\033[?1000h", &out);
         wait_for_mode(&mut backend, TermMode::MOUSE_REPORT_CLICK);
 
-        backend.handle(Command::Scroll(1, Point::new(Line(2), Column(3)), Modifiers::empty()));
+        backend.handle(Command::Scroll(
+            1,
+            Point::new(Line(2), Column(3)),
+            Modifiers::empty(),
+        ));
 
         let expected = vec![0x1b, b'[', b'M', 32 + 64, 32 + 1 + 3, 32 + 1 + 2];
         assert_eq!(read_until(&out, expected.len()), expected);

@@ -428,7 +428,8 @@ Sudah ada:
 - Perbaikan CPU dari profiling: warna tema di-parse sekali (bukan per sel per frame); font diukur sekali
   (bukan per event PTY); event `Wakeup` beruntun digabung; tab tersembunyi tidak menyalin layarnya;
   sidebar riwayat memakai `lazy` (dibangun ulang hanya saat datanya berubah).
-  Sisa yang diketahui: `Backend::sync` masih menyalin seluruh grid tiap event pada tab yang tampil.
+  Grid tidak lagi disalin: gambar langsung dari state terminal (dengan lock) hanya saat perlu digambar ulang.
+  Biaya sync dengan scrollback penuh turun dari ~5,5 ms ke < 0,001 ms per event.
 - Test unit `core`: parser, index bertahap, urutan judul, deteksi proses nyata, pencocokan session, simpan atomic.
 
 Belum ada (sengaja ditunda):

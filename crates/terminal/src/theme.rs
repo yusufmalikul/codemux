@@ -106,8 +106,9 @@ impl Theme {
             .map(|i| theme.resolve(ansi::Color::Indexed(i)))
             .collect();
         resolved.extend(
-            (0..NAMED_COUNT)
-                .map(|n| theme.resolve(ansi::Color::Named(named_from_index(n)))),
+            (0..NAMED_COUNT).map(|n| {
+                theme.resolve(ansi::Color::Named(named_from_index(n)))
+            }),
         );
         theme.resolved = resolved;
         theme
@@ -216,11 +217,35 @@ const NAMED_COUNT: usize = 269;
 fn named_from_index(n: usize) -> NamedColor {
     use NamedColor::*;
     const ALL: [NamedColor; 29] = [
-        Black, Red, Green, Yellow, Blue, Magenta, Cyan, White, BrightBlack,
-        BrightRed, BrightGreen, BrightYellow, BrightBlue, BrightMagenta,
-        BrightCyan, BrightWhite, Foreground, Background, Cursor, DimBlack,
-        DimRed, DimGreen, DimYellow, DimBlue, DimMagenta, DimCyan, DimWhite,
-        BrightForeground, DimForeground,
+        Black,
+        Red,
+        Green,
+        Yellow,
+        Blue,
+        Magenta,
+        Cyan,
+        White,
+        BrightBlack,
+        BrightRed,
+        BrightGreen,
+        BrightYellow,
+        BrightBlue,
+        BrightMagenta,
+        BrightCyan,
+        BrightWhite,
+        Foreground,
+        Background,
+        Cursor,
+        DimBlack,
+        DimRed,
+        DimGreen,
+        DimYellow,
+        DimBlue,
+        DimMagenta,
+        DimCyan,
+        DimWhite,
+        BrightForeground,
+        DimForeground,
     ];
     ALL.iter()
         .copied()
