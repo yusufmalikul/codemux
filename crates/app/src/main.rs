@@ -920,21 +920,18 @@ fn empty_state<'a>() -> Element<'a, Message> {
 }
 
 fn section(label: &'static str) -> Element<'static, Message> {
-    // Bold, larger, and with space above so each group stands apart from the
-    // rows of the group before it.
-    let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
-    container(text(label).size(14).font(bold)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
+    // Space above so each group stands apart from the rows of the group before it.
+    container(text(label).size(14)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
 }
 
 /// A workspace row in the sidebar tree: an arrow, the name, and the number
 /// of sessions. Click to collapse or expand. User workspaces also get a
 /// delete button; the default workspace cannot be removed.
 fn workspace_header(id: Option<u64>, name: &str, count: usize, open_tabs: usize, open: bool) -> Element<'static, Message> {
-    let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
     let arrow = if open { "▾" } else { "▸" };
     // Shown even when collapsed, so open tabs are never out of sight.
     let badge = if open_tabs > 0 { format!("  ● {open_tabs} open") } else { String::new() };
-    let toggle = button(text(format!("{arrow} {name}  ({count}){badge}")).size(15).font(bold))
+    let toggle = button(text(format!("{arrow} {name}  ({count}){badge}")).size(15))
         .on_press(Message::ToggleWorkspace(id))
         .width(Length::Fill)
         .style(button::text);
@@ -989,12 +986,11 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
     .into()
 }
 
-/// Two-line sidebar label. The name is bold and larger so it is easy to scan;
+/// Two-line sidebar label. The name is larger so it is easy to scan;
 /// the details line is smaller so it does not compete with it.
 fn row_label(title: String, details: String) -> Element<'static, Message> {
-    let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
     column![
-        text(title).size(16).font(bold),
+        text(title).size(16),
         text(details).size(12),
     ]
     .spacing(2)
