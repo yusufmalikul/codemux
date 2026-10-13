@@ -96,8 +96,8 @@ struct App {
     scale_factor: f32,
     /// Session waiting for "Delete permanently" confirmation.
     confirm_delete: Option<String>,
-    /// Privacy: hide all session rows in the sidebar (saved in state.json).
-    hide_sessions: bool,
+    /// Privacy: the sidebar is collapsed (saved in state.json).
+    hide_sidebar: bool,
     sidebar_width: f32,
     /// True while the user drags the sidebar divider.
     resizing: bool,
@@ -107,7 +107,7 @@ struct App {
 enum Message {
     Terminal(term::Event),
     Tick,
-    ToggleHideSessions,
+    ToggleHideSidebar,
     ResizeStart,
     /// Cursor x while dragging the divider.
     ResizeTo(f32),
@@ -156,7 +156,7 @@ impl App {
             error: None,
             scale_factor: 1.0,
             confirm_delete: None,
-            hide_sessions: state.hide_sessions,
+            hide_sidebar: state.hide_sidebar,
             sidebar_width: state.sidebar_width.unwrap_or(SIDEBAR_DEFAULT).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             resizing: false,
         };
@@ -175,7 +175,7 @@ impl App {
     fn save_state(&self) {
         let Some(path) = &self.state_path else { return };
         let open_sessions = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
-        let _ = AppState { version: 0, open_sessions, hide_sessions: self.hide_sessions,
+        let _ = AppState { version: 0, open_sessions, hide_sidebar: self.hide_sidebar,
             sidebar_width: Some(self.sidebar_width),
         }
         .save(path);
@@ -364,8 +364,8 @@ impl App {
                 }
             }
             Message::Search(s) => self.search = s,
-            Message::ToggleHideSessions => {
-                self.hide_sessions = !self.hide_sessions;
+            Message::ToggleHideSidebar => {
+                self.hide_sidebar = !self.hide_sidebar;
                 self.save_state();
             }
             Message::ResizeStart => self.resizing = true,
@@ -450,6 +450,12 @@ impl App {
     // ---------- view ----------
 
     fn view(&self) -> Element<'_, Message> {
+        if self.hide_sidebar {
+            let show = container(button(text("›").size(14)).on_press(Message::ToggleHideSidebar).style(button::text))
+                .height(Length::Fill)
+                .padding(4);
+            return row![show, rule::vertical(1), self.main_area()].into();
+        }
         let sidebar = container(self.sidebar()).width(self.sidebar_width).height(Length::Fill).padding(8);
         // A wider grab area than the 1px line, so the divider is easy to hit.
         let divider = mouse_area(container(rule::vertical(1)).width(5).center_x(5))
@@ -517,16 +523,11 @@ impl App {
         let deps = (self.index_version, self.search.clone(), selected_session, self.previously_open.clone(), active, minute);
         list = list.push(lazy(deps, move |(_, _, _, _, active, _)| self.history_list(active)));
 
-        let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W close" } else { "Ctrl+Shift+N / T / W" };
-        let (hide_label, list): (_, Element<'_, Message>) = if self.hide_sessions {
-            ("Show", text("Sessions hidden").size(12).into())
-        } else {
-            ("Hide", scrollable(list).height(Length::Fill).into())
-        };
+        let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W close · ⌘B hide" } else { "Ctrl+Shift+N / T / W / B" };
         column![
             row![
                 text_input("Search sessions…", &self.search).on_input(Message::Search).size(13),
-                button(text(hide_label).size(12)).on_press(Message::ToggleHideSessions).style(button::secondary),
+                button(text("‹ Hide").size(12)).on_press(Message::ToggleHideSidebar).style(button::secondary),
             ]
             .spacing(6),
             row![
@@ -535,7 +536,7 @@ impl App {
             ]
             .spacing(6),
             row![text(shortcut_hint).size(10).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(10)],
-            list,
+            scrollable(list).height(Length::Fill),
         ]
         .spacing(8)
         .into()
@@ -735,6 +736,7 @@ fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::win
             "n" => Some(Message::NewSession),
             "t" => Some(Message::NewTerminal),
             "w" => Some(Message::CloseSelected),
+            "b" => Some(Message::ToggleHideSidebar),
             d if d.len() == 1 && ('1'..='9').contains(&d.chars().next()?) => {
                 Some(Message::SelectIndex(d.parse::<usize>().ok()? - 1))
             }
@@ -836,19 +838,20 @@ mod tests {
         assert!(app.error.is_some());
     }
 
-    /// Privacy: the toggle hides every session row, and stays on after restart.
+    /// Hide collapses the whole sidebar (privacy), and stays hidden after restart.
     #[test]
-    fn hide_sessions_hides_rows_and_is_remembered() {
+    fn hide_sidebar_collapses_it_and_is_remembered() {
         let (dir, mut app) = fixture();
         let _ = app.update(Message::NewTerminal);
-        let msgs = vec![Message::ToggleHideSessions];
+        let msgs = vec![Message::ToggleHideSidebar];
         assert!(!found_after_frames(&mut app, msgs, "○ Fix webhook retry"), "history still visible");
-        assert!(!found_after_frames(&mut app, vec![], "AKTIF"), "active tabs still visible");
-        assert!(found_after_frames(&mut app, vec![], "Sessions hidden"));
+        assert!(!found_after_frames(&mut app, vec![], "ACTIVE"), "active tabs still visible");
+        assert!(!found_after_frames(&mut app, vec![], "+ New session"), "sidebar buttons still visible");
+        assert!(found_after_frames(&mut app, vec![], "›"), "no button to show the sidebar again");
 
         let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
         assert!(!found_after_frames(&mut again, vec![], "○ Fix webhook retry"), "not remembered");
-        assert!(found_after_frames(&mut again, vec![Message::ToggleHideSessions], "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut again, vec![Message::ToggleHideSidebar], "○ Fix webhook retry"));
     }
 
     /// Dragging the divider sets the sidebar width, within limits, and it is remembered.

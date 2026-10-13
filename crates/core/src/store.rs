@@ -13,9 +13,9 @@ pub struct AppState {
     /// Session IDs that had a running terminal at the last save, in tab order.
     #[serde(default)]
     pub open_sessions: Vec<String>,
-    /// Privacy: hide all session rows in the sidebar.
-    #[serde(default)]
-    pub hide_sessions: bool,
+    /// Privacy: the sidebar is collapsed.
+    #[serde(default, alias = "hide_sidebar")]
+    pub hide_sidebar: bool,
     /// Sidebar width in logical pixels. None means the default width.
     #[serde(default)]
     pub sidebar_width: Option<f32>,
@@ -53,11 +53,11 @@ mod tests {
     fn save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub").join("state.json");
-        let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sessions: true, sidebar_width: Some(420.0) };
+        let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sidebar: true, sidebar_width: Some(420.0) };
         s.save(&p).unwrap();
         let loaded = AppState::load(&p);
         assert_eq!(loaded.open_sessions, s.open_sessions);
-        assert!(loaded.hide_sessions);
+        assert!(loaded.hide_sidebar);
         assert_eq!(loaded.sidebar_width, Some(420.0));
         assert_eq!(loaded.version, STATE_VERSION);
         assert!(!p.with_extension("tmp").exists());
