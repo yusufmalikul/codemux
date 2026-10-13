@@ -73,6 +73,8 @@ struct Tab {
     claude: Option<ClaudeProc>,
     cwd: PathBuf,
     last_output: Instant,
+    /// Busy or idle, read from the title Claude sets. None until Claude sets one.
+    busy: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -252,6 +254,7 @@ impl App {
                     claude: None,
                     cwd: spec.cwd,
                     last_output: Instant::now(),
+                    busy: None,
                 });
                 self.selected = Selected::Tab(id);
                 self.reveal_tab(id);
@@ -362,6 +365,15 @@ impl App {
         match message {
             Message::Terminal(term::Event::BackendCall(id, cmd)) => {
                 let Some(pos) = self.tabs.iter().position(|t| t.id == id) else { return Task::none() };
+                match &cmd {
+                    term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Title(t)) => {
+                        self.tabs[pos].busy = claude_title_busy(t);
+                    }
+                    term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::ResetTitle) => {
+                        self.tabs[pos].busy = None;
+                    }
+                    _ => {}
+                }
                 if let term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Wakeup) = &cmd {
                     self.tabs[pos].last_output = Instant::now();
                     // A hidden tab does not need a fresh copy of its screen.
@@ -614,7 +626,7 @@ impl App {
         let running_claude = tab.kind == TabKind::Claude || tab.claude.is_some();
         if !running_claude {
             ("▸", "shell")
-        } else if tab.last_output.elapsed() < BUSY_WINDOW {
+        } else if tab.busy.unwrap_or_else(|| tab.last_output.elapsed() < BUSY_WINDOW) {
             ("●", "working")
         } else {
             ("◐", "waiting")
@@ -1043,6 +1055,18 @@ fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::win
     }
 }
 
+/// Claude Code puts its state at the start of the terminal title:
+/// "✳ <title>" while it waits, a spinner like "◐ <title>" while it works.
+/// None for any other title, such as a plain shell prompt.
+fn claude_title_busy(title: &str) -> Option<bool> {
+    let mut chars = title.chars();
+    let first = chars.next()?;
+    if chars.next() != Some(' ') || first.is_alphanumeric() || first.is_ascii() {
+        return None;
+    }
+    Some(first != '✳')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,6 +1263,26 @@ mod tests {
 
         assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], "▸ Fix webhook retry"), "not opened on select");
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"));
+    }
+
+    /// Claude redraws its status line now and then while idle. That output
+    /// must not flip the row to "working". Claude's own title tells the truth:
+    /// a spinner while it works, "✳" while it waits.
+    #[test]
+    fn idle_redraw_does_not_show_working() {
+        let (_dir, mut app) = fixture();
+        let _ = app.update(Message::NewTerminal);
+        app.tabs[0].kind = TabKind::Claude;
+        let id = app.tabs[0].id;
+        let folder = folder_label(&app.tabs[0].cwd);
+        let event = |e| Message::Terminal(term::Event::BackendCall(id, term::BackendCommand::ProcessAlacrittyEvent(e)));
+
+        let idle = vec![event(term::AlacrittyEvent::Title("✳ Fix webhook".into())), event(term::AlacrittyEvent::Wakeup)];
+        assert!(found_after_frames(&mut app, idle, &format!("   {folder} · waiting")), "idle redraw shown as working");
+
+        let busy = vec![event(term::AlacrittyEvent::Title("◐ Fix webhook".into()))];
+        app.tabs[0].last_output = Instant::now() - BUSY_WINDOW * 5;
+        assert!(found_after_frames(&mut app, busy, &format!("   {folder} · working")), "spinner title not shown as working");
     }
 
     /// The ✕ on a workspace only asks first. Cancel keeps it; Delete removes it.
