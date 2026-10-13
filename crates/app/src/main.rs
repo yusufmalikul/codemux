@@ -679,7 +679,10 @@ fn empty_state<'a>() -> Element<'a, Message> {
 }
 
 fn section(label: &'static str) -> Element<'static, Message> {
-    container(text(label).size(10)).padding([6, 4]).into()
+    // Bold, larger, and with space above so each group stands apart from the
+    // rows of the group before it.
+    let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
+    container(text(label).size(12).font(bold)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
 }
 
 fn folder_label(p: &std::path::Path) -> String {
