@@ -507,8 +507,12 @@ impl App {
                         .width(Length::Fill)
                         // Green marks a running tab; the selected one stays blue so it still stands out.
                         .style(if selected { button::primary } else { button::success }),
-                    button(text("✕").size(13)).on_press(Message::CloseTab(tab.id)).style(button::text),
-                ];
+                    button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(tab.id)).style(button::text),
+                ]
+                // Keep the close button clear of the scrollbar on the right.
+                .spacing(4)
+                .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 })
+                .align_y(iced::Alignment::Center);
                 list = list.push(line);
             }
         }
