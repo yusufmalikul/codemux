@@ -27,6 +27,13 @@ const DEFAULT_WORKSPACE: &str = "Default";
 /// Left indent of rows inside a workspace, so the sidebar reads as a tree.
 const TREE_INDENT: f32 = 16.0;
 const WORKSPACE_INPUT: &str = "new-workspace-name";
+/// iced ships only Fira Sans Regular, so bold text fell back to another
+/// font. The app loads Fira Sans Bold itself and asks for it by name.
+const BOLD: iced::Font = iced::Font {
+    family: iced::font::Family::Name("Fira Sans"),
+    weight: iced::font::Weight::Bold,
+    ..iced::Font::DEFAULT
+};
 
 fn main() -> iced::Result {
     launch::clean_inherited_env();
@@ -34,6 +41,7 @@ fn main() -> iced::Result {
     launch::load_shell_path();
     iced::application(App::new, App::update, App::view)
         .title("Codemux")
+        .font(include_bytes!("../assets/fonts/FiraSans-Bold.ttf").as_slice())
         .window_size((1280.0, 800.0))
         .subscription(App::subscription)
         .theme(App::theme)
@@ -823,7 +831,7 @@ impl App {
             sub.push(b.clone());
         }
         sub.push(relative_time(m.sort_time()));
-        button(row_label(m.title(), format!("   {}", sub.join(" · "))))
+        button(row_label(m.title(), format!("   {}", sub.join(" · ")), false))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -972,7 +980,7 @@ struct TabRow {
 
 fn tab_row(t: &TabRow) -> Element<'static, Message> {
     row![
-        button(row_label(t.title.clone(), format!("   {} · {}", t.folder, t.status)))
+        button(row_label(t.title.clone(), format!("   {} · {}", t.folder, t.status), true))
             .on_press(Message::SelectTab(t.id))
             .width(Length::Fill)
             // Green marks a running tab; the selected one stays blue so it still stands out.
@@ -984,11 +992,12 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
     .into()
 }
 
-/// Two-line sidebar label. The name is larger so it is easy to scan;
-/// the details line is smaller so it does not compete with it.
-fn row_label(title: String, details: String) -> Element<'static, Message> {
+/// Two-line sidebar label. The name is larger so it is easy to scan, and
+/// bold for a session open in a tab; the details line is smaller so it does
+/// not compete with it.
+fn row_label(title: String, details: String, bold: bool) -> Element<'static, Message> {
     column![
-        text(title).size(16),
+        text(title).size(16).font(if bold { BOLD } else { iced::Font::DEFAULT }),
         text(details).size(12),
     ]
     .spacing(2)
