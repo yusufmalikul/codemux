@@ -1,3 +1,5 @@
+<p align="center"><img src="crates/app/assets/icon.png" alt="Codemux icon" width="128"></p>
+
 # codemux
 
 A desktop session manager for Claude Code.
