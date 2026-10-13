@@ -30,6 +30,8 @@ const WORKSPACE_INPUT: &str = "new-workspace-name";
 
 fn main() -> iced::Result {
     launch::clean_inherited_env();
+    #[cfg(unix)]
+    launch::load_shell_path();
     iced::application(App::new, App::update, App::view)
         .title("Codemux")
         .window_size((1280.0, 800.0))

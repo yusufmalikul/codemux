@@ -26,6 +26,14 @@ You need [Rust](https://rustup.rs) (stable) and the `claude` CLI on your `PATH`.
 cargo run --release -p codemux
 ```
 
+On macOS, install it as an app, so you can open it from Spotlight (Cmd+Space, type "codemux"), Finder, or Launchpad:
+
+```sh
+./scripts/install-macos.sh
+```
+
+Run the script again after you pull changes, to update the app.
+
 Run the tests:
 
 ```sh

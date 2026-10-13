@@ -113,6 +113,34 @@ pub fn clean_inherited_env() {
     }
 }
 
+/// Apps opened from Finder or Spotlight get a bare PATH (`/usr/bin:/bin:...`),
+/// and `zsh -l` does not read `~/.zshrc`, so `claude` is not found.
+/// Copy PATH from the user's interactive login shell, like a normal terminal.
+/// Call once at startup, before any thread is spawned.
+#[cfg(unix)]
+pub fn load_shell_path() {
+    if let Some(path) = read_shell_path(&user_shell(), None) {
+        std::env::set_var("PATH", path);
+    }
+}
+
+/// Run `shell -l -i` and print PATH between markers, because rc files may print text too.
+#[cfg(unix)]
+fn read_shell_path(shell: &str, home: Option<&std::path::Path>) -> Option<String> {
+    use std::process::{Command, Stdio};
+    const MARK: &str = "__CODEMUX_PATH__";
+    let mut cmd = Command::new(shell);
+    cmd.args(["-l", "-i", "-c", &format!("printf '{MARK}%s{MARK}' \"$PATH\"")])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(h) = home {
+        cmd.env("HOME", h).env("ZDOTDIR", h);
+    }
+    let out = String::from_utf8(cmd.output().ok()?.stdout).ok()?;
+    let path = out.split(MARK).nth(1)?;
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +214,15 @@ mod tests {
             .unwrap();
         assert!(String::from_utf8(out.stdout).unwrap().ends_with("claude --resume abc-1\n"));
         assert!(!tmp.path().join("data").exists());
+    }
+
+    /// Like Finder: bare PATH, and the user adds `~/.local/bin` in `~/.zshrc`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_path_from_interactive_shell_rc() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".zshrc"), "echo hello\nexport PATH=\"/my/bin:$PATH\"\n").unwrap();
+        let path = read_shell_path("/bin/zsh", Some(tmp.path())).unwrap();
+        assert!(path.starts_with("/my/bin:"), "{path}");
     }
 }
