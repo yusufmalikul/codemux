@@ -69,6 +69,8 @@ struct App {
     previously_open: Vec<String>,
     search: String,
     error: Option<String>,
+    /// Window scale factor, passed to every terminal (trackpad scroll speed).
+    scale_factor: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -85,12 +87,16 @@ enum Message {
     CloseSelected,
     Search(String),
     SelectIndex(usize),
+    ScaleFactor(f32),
 }
 
 impl App {
     fn new() -> (Self, Task<Message>) {
         let state_path = paths::app_data_dir().map(|d| d.join("state.json"));
-        (Self::with_paths(paths::projects_dir(), state_path), Task::none())
+        let scale = iced::window::latest()
+            .and_then(iced::window::scale_factor)
+            .map(Message::ScaleFactor);
+        (Self::with_paths(paths::projects_dir(), state_path), scale)
     }
 
     fn with_paths(projects_dir: Option<PathBuf>, state_path: Option<PathBuf>) -> Self {
@@ -107,6 +113,7 @@ impl App {
             previously_open,
             search: String::new(),
             error: None,
+            scale_factor: 1.0,
         };
         app.refresh_index();
         app
@@ -139,7 +146,8 @@ impl App {
             ..Default::default()
         };
         match term::Terminal::new(id, settings) {
-            Ok(t) => {
+            Ok(mut t) => {
+                t.handle(term::Command::SetScaleFactor(self.scale_factor));
                 let focus = term::TerminalView::focus(t.widget_id().clone());
                 self.tabs.push(Tab {
                     id,
@@ -304,6 +312,12 @@ impl App {
                 }
             }
             Message::Search(s) => self.search = s,
+            Message::ScaleFactor(scale) => {
+                self.scale_factor = scale;
+                for tab in &mut self.tabs {
+                    tab.term.handle(term::Command::SetScaleFactor(scale));
+                }
+            }
             Message::SelectIndex(i) => {
                 if let Some(id) = self.tabs.get(i).map(|t| t.id) {
                     self.selected = Selected::Tab(id);
@@ -565,6 +579,9 @@ fn relative_time(t: DateTime<Utc>) -> String {
 /// App shortcuts. macOS uses ⌘, which the terminal does not need.
 /// Windows/Linux use Ctrl+Shift, so plain Ctrl keys stay with the terminal (spec 6.3).
 fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::window::Id) -> Option<Message> {
+    if let iced::Event::Window(iced::window::Event::Rescaled(scale)) = event {
+        return Some(Message::ScaleFactor(scale));
+    }
     let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else { return None };
     let app_mod = if cfg!(target_os = "macos") {
         modifiers.logo() && !modifiers.control()

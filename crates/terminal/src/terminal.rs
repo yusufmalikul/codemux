@@ -26,6 +26,7 @@ pub enum Event {
 pub enum Command {
     ChangeTheme(Box<ColorPalette>),
     ChangeFont(FontSettings),
+    SetScaleFactor(f32),
     AddBindings(Vec<(Binding<InputKind>, BindingAction)>),
     ProxyToBackend(backend::Command),
 }
@@ -38,6 +39,9 @@ pub struct Terminal {
     pub(crate) cache: Cache,
     pub(crate) bindings: BindingsLayout,
     pub(crate) backend: backend::Backend,
+    /// Window scale factor (2.0 on Retina). Trackpad deltas are in physical
+    /// pixels, so they are divided by this.
+    pub(crate) scale_factor: f32,
     backend_event_rx: Arc<Mutex<Receiver<AlacrittyEvent>>>,
 }
 
@@ -54,6 +58,7 @@ impl Terminal {
             theme,
             bindings: BindingsLayout::default(),
             cache: Cache::default(),
+            scale_factor: 1.0,
             backend: backend::Backend::new(
                 id,
                 backend_event_tx,
@@ -94,6 +99,11 @@ impl Terminal {
             Command::ChangeFont(font_settings) => {
                 self.font = TermFont::new(font_settings);
                 self.sync_font();
+            },
+            Command::SetScaleFactor(scale) => {
+                if scale > 0.0 {
+                    self.scale_factor = scale;
+                }
             },
             Command::AddBindings(bindings) => {
                 self.bindings.add_bindings(bindings);

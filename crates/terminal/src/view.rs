@@ -162,6 +162,7 @@ impl<'a> TerminalView<'a> {
                     state,
                     *delta,
                     &self.term.font.measure,
+                    self.term.scale_factor,
                     &mut commands,
                 );
             },
@@ -284,6 +285,7 @@ impl<'a> TerminalView<'a> {
         state: &mut TerminalViewState,
         delta: ScrollDelta,
         font_measure: &Size<f32>,
+        scale_factor: f32,
         commands: &mut Vec<Command>,
     ) {
         match delta {
@@ -292,8 +294,10 @@ impl<'a> TerminalView<'a> {
                 commands.push(Command::Scroll(lines as i32, state.mouse_position_on_grid, state.keyboard_modifiers));
             },
             ScrollDelta::Pixels { y, .. } => {
-                state.scroll_pixels -= y;
-                let line_height = font_measure.height; // Assume this method exists and gives the height of a line
+                // Same sign as Lines: positive y = toward history.
+                // Deltas are physical pixels; line height is logical.
+                state.scroll_pixels += y / scale_factor.max(0.1);
+                let line_height = font_measure.height;
                 let lines = (state.scroll_pixels / line_height).trunc();
                 state.scroll_pixels %= line_height;
                 if lines != 0.0 {
@@ -1193,6 +1197,36 @@ mod tests {
         use crate::font::TermFont;
         use crate::settings::FontSettings;
 
+        /// Trackpad deltas arrive in physical pixels. On a 2x (Retina) screen
+        /// the same finger move gives twice the pixels, but must scroll the
+        /// same number of lines as on a 1x screen.
+        #[test]
+        fn pixel_scroll_respects_scale_factor() {
+            let font = TermFont::new(FontSettings::default());
+            let line = font.measure.height;
+            let lines_for = |scale: f32, physical: f32| {
+                let mut state = TerminalViewState::new();
+                let mut commands = Vec::new();
+                TerminalView::handle_wheel_scrolled(
+                    &mut state,
+                    ScrollDelta::Pixels { x: 0.0, y: physical },
+                    &font.measure,
+                    scale,
+                    &mut commands,
+                );
+                commands
+                    .iter()
+                    .map(|c| match c {
+                        Command::Scroll(n, _, _) => *n,
+                        _ => 0,
+                    })
+                    .sum::<i32>()
+            };
+            // Two logical lines of finger movement.
+            assert_eq!(lines_for(1.0, line * 2.0 + 1.0), 2);
+            assert_eq!(lines_for(2.0, (line * 2.0 + 1.0) * 2.0), 2);
+        }
+
         #[test]
         fn scroll_with_lines_downward() {
             let mut state = TerminalViewState::new();
@@ -1203,6 +1237,7 @@ mod tests {
                 &mut state,
                 ScrollDelta::Lines { y: 3.0, x: 0.0 }, // Scroll down 3 lines
                 &font.measure,
+                1.0,
                 &mut commands,
             );
 
@@ -1220,6 +1255,7 @@ mod tests {
                 &mut state,
                 ScrollDelta::Lines { y: -2.0, x: 0.0 },
                 &font.measure,
+                1.0,
                 &mut commands,
             );
 
@@ -1237,12 +1273,15 @@ mod tests {
                 &mut state,
                 ScrollDelta::Pixels { y: 45.0, x: 0.0 },
                 &font.measure,
+                1.0,
                 &mut commands,
             );
 
+            // Same sign as ScrollDelta::Lines: positive y scrolls toward history.
+            // macOS already applies "natural scrolling" to the delta.
             assert_eq!(commands.len(), 1);
-            assert!(matches!(commands[0], Command::Scroll(-2, _, _)));
-            assert_eq!(state.scroll_pixels, -8.600002);
+            assert!(matches!(commands[0], Command::Scroll(2, _, _)));
+            assert_eq!(state.scroll_pixels, 8.600002);
         }
 
         #[test]
@@ -1255,12 +1294,13 @@ mod tests {
                 &mut state,
                 ScrollDelta::Pixels { y: -60.0, x: 0.0 },
                 &font.measure,
+                1.0,
                 &mut commands,
             );
 
             assert_eq!(commands.len(), 1);
-            assert!(matches!(commands[0], Command::Scroll(3, _, _)));
-            assert_eq!(state.scroll_pixels, 5.4000034);
+            assert!(matches!(commands[0], Command::Scroll(-3, _, _)));
+            assert_eq!(state.scroll_pixels, -5.4000034);
         }
     }
 }

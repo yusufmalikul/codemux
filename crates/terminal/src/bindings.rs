@@ -241,7 +241,9 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         "\'",       Modifiers::CTRL; BindingAction::Char('\x1c');
         "-",        Modifiers::CTRL; BindingAction::Char('\x1f');
         // SHIFT
-        Enter,      Modifiers::SHIFT; BindingAction::Char('\x0d');
+        // ESC + CR = new line in Claude Code (same as Alt+Enter). CR alone submits.
+        Enter,      Modifiers::SHIFT; BindingAction::Esc("\x1b\x0d".into());
+        Enter,      Modifiers::ALT;   BindingAction::Esc("\x1b\x0d".into());
         Backspace,  Modifiers::SHIFT; BindingAction::Char('\x7f');
         Tab,        Modifiers::SHIFT; BindingAction::Esc("\x1b[Z".into());
         End,        Modifiers::SHIFT, +TermMode::ALT_SCREEN; BindingAction::Esc("\x1b[1;2F".into());
@@ -362,6 +364,28 @@ mod tests {
         keyboard::{key::Named, Modifiers},
         mouse::Button,
     };
+
+    /// Claude Code treats ESC + CR as "new line" and CR alone as "send".
+    /// Shift+Enter must insert a new line, not send the prompt.
+    #[test]
+    fn shift_enter_sends_newline_not_submit() {
+        let layout = BindingsLayout::default();
+        let enter = InputKind::KeyCode(Named::Enter);
+        for mode in [TermMode::empty(), TermMode::ALT_SCREEN] {
+            assert_eq!(
+                layout.get_action(enter.clone(), Modifiers::empty(), mode),
+                BindingAction::Char('\x0d')
+            );
+            assert_eq!(
+                layout.get_action(enter.clone(), Modifiers::SHIFT, mode),
+                BindingAction::Esc("\x1b\x0d".into())
+            );
+            assert_eq!(
+                layout.get_action(enter.clone(), Modifiers::ALT, mode),
+                BindingAction::Esc("\x1b\x0d".into())
+            );
+        }
+    }
 
     #[test]
     fn add_new_custom_keyboard_binding() {
