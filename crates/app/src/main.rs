@@ -624,14 +624,14 @@ impl App {
         }
     }
 
-    fn tab_status(&self, tab: &Tab) -> (&'static str, &'static str) {
+    fn tab_status(&self, tab: &Tab) -> &'static str {
         let running_claude = tab.kind == TabKind::Claude || tab.claude.is_some();
         if !running_claude {
-            ("▸", "shell")
+            "shell"
         } else if tab.busy.unwrap_or_else(|| tab.last_output.elapsed() < BUSY_WINDOW) {
-            ("●", "working")
+            "working"
         } else {
-            ("◐", "waiting")
+            "waiting"
         }
     }
 
@@ -647,13 +647,12 @@ impl App {
             .iter()
             .map(|tab| {
                 let (title, folder) = self.tab_title(tab);
-                let (icon, status) = self.tab_status(tab);
+                let status = self.tab_status(tab);
                 TabRow {
                     id: tab.id,
                     session: tab.session_id.clone(),
                     title,
                     folder,
-                    icon,
                     status,
                     selected: self.selected == Selected::Tab(tab.id),
                 }
@@ -824,7 +823,7 @@ impl App {
             sub.push(b.clone());
         }
         sub.push(relative_time(m.sort_time()));
-        button(row_label(format!("○ {}", m.title()), format!("   {}", sub.join(" · "))))
+        button(row_label(m.title(), format!("   {}", sub.join(" · "))))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -967,14 +966,13 @@ struct TabRow {
     session: Option<String>,
     title: String,
     folder: String,
-    icon: &'static str,
     status: &'static str,
     selected: bool,
 }
 
 fn tab_row(t: &TabRow) -> Element<'static, Message> {
     row![
-        button(row_label(format!("{} {}", t.icon, t.title), format!("   {} · {}", t.folder, t.status)))
+        button(row_label(t.title.clone(), format!("   {} · {}", t.folder, t.status)))
             .on_press(Message::SelectTab(t.id))
             .width(Length::Fill)
             // Green marks a running tab; the selected one stays blue so it still stands out.
@@ -1139,7 +1137,7 @@ mod tests {
     fn sidebar_keeps_sessions_after_more_frames() {
         let (_dir, mut app) = fixture();
         let msgs = vec![Message::Tick, Message::Search(String::new()), Message::Tick];
-        assert!(found_after_frames(&mut app, msgs, "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, msgs, "Fix webhook retry"));
     }
 
     /// Opening a tab adds rows above the history list. The history must stay.
@@ -1147,7 +1145,7 @@ mod tests {
     fn sidebar_keeps_sessions_after_opening_a_terminal() {
         let (_dir, mut app) = fixture();
         let msgs = vec![Message::Tick, Message::NewTerminal, Message::Tick];
-        assert!(found_after_frames(&mut app, msgs, "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, msgs, "Fix webhook retry"));
     }
 
     #[test]
@@ -1159,7 +1157,7 @@ mod tests {
             Message::DeleteAsk("s1".into()),
             Message::DeleteConfirm("s1".into()),
         ];
-        assert!(!found_after_frames(&mut app, msgs, "○ Fix webhook retry"));
+        assert!(!found_after_frames(&mut app, msgs, "Fix webhook retry"));
         assert!(!file.exists());
         assert!(app.index.get("s1").is_none());
         assert_eq!(app.selected, Selected::None);
@@ -1181,14 +1179,14 @@ mod tests {
         let (dir, mut app) = fixture();
         let _ = app.update(Message::NewTerminal);
         let msgs = vec![Message::ToggleHideSidebar];
-        assert!(!found_after_frames(&mut app, msgs, "○ Fix webhook retry"), "history still visible");
+        assert!(!found_after_frames(&mut app, msgs, "Fix webhook retry"), "history still visible");
         assert!(!found_after_frames(&mut app, vec![], "ACTIVE"), "active tabs still visible");
         assert!(!found_after_frames(&mut app, vec![], "+ New session"), "sidebar buttons still visible");
         assert!(found_after_frames(&mut app, vec![], "›"), "no button to show the sidebar again");
 
         let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
-        assert!(!found_after_frames(&mut again, vec![], "○ Fix webhook retry"), "not remembered");
-        assert!(found_after_frames(&mut again, vec![Message::ToggleHideSidebar], "○ Fix webhook retry"));
+        assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"), "not remembered");
+        assert!(found_after_frames(&mut again, vec![Message::ToggleHideSidebar], "Fix webhook retry"));
     }
 
     /// Dragging the divider sets the sidebar width, within limits, and it is remembered.
@@ -1210,7 +1208,7 @@ mod tests {
         }
         let again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
         assert_eq!(again.sidebar_width, 450.0);
-        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
     }
 
     /// A new workspace shows in the sidebar. A session moved into it is
@@ -1229,22 +1227,22 @@ mod tests {
         ];
         assert!(found_after_frames(&mut app, msgs, "▾ Backend  (1)"), "workspace not shown");
         assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
-        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
 
-        assert!(!found_after_frames(&mut app, vec![Message::ToggleWorkspace(Some(1))], "○ Fix webhook retry"), "not collapsed");
+        assert!(!found_after_frames(&mut app, vec![Message::ToggleWorkspace(Some(1))], "Fix webhook retry"), "not collapsed");
         assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)"));
         // Search opens collapsed workspaces so matches are not hidden.
-        assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "Fix webhook retry"));
         let _ = app.update(Message::Search(String::new()));
 
         let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
         assert!(found_after_frames(&mut again, vec![], "▸ Backend  (1)"), "not remembered");
-        assert!(!found_after_frames(&mut again, vec![], "○ Fix webhook retry"));
+        assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"));
 
         let msgs = vec![Message::DeleteWorkspace(1)];
-        assert!(found_after_frames(&mut again, msgs, "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut again, msgs, "Fix webhook retry"));
         assert!(found_after_frames(&mut again, vec![], "▾ Default  (1)"));
-        assert!(!found_after_frames(&mut again, vec![Message::ToggleWorkspace(None)], "○ Fix webhook retry"), "default not collapsed");
+        assert!(!found_after_frames(&mut again, vec![Message::ToggleWorkspace(None)], "Fix webhook retry"), "default not collapsed");
     }
 
     /// A session open in a tab stays inside its workspace (there is no
@@ -1264,17 +1262,21 @@ mod tests {
         }
         app.tabs[0].session_id = Some("s1".into());
         let tab = app.tabs[0].id;
+        // The title also shows above the terminal, so look for the details
+        // line, which only the sidebar row has.
+        let row = format!("   {} · shell", folder_label(&app.tabs[0].cwd));
+        let row = row.as_str();
 
         assert!(!found_after_frames(&mut app, vec![], "ACTIVE"), "separate ACTIVE list still shown");
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"), "open badge missing");
-        assert!(found_after_frames(&mut app, vec![], "▸ Fix webhook retry"), "tab row not in its workspace");
+        assert!(found_after_frames(&mut app, vec![], row), "tab row not in its workspace");
         assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
 
         let msgs = vec![Message::ToggleWorkspace(Some(1))];
-        assert!(!found_after_frames(&mut app, msgs, "▸ Fix webhook retry"), "not collapsed");
+        assert!(!found_after_frames(&mut app, msgs, row), "not collapsed");
         assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"));
 
-        assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], "▸ Fix webhook retry"), "not opened on select");
+        assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], row), "not opened on select");
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"));
     }
 
@@ -1332,7 +1334,7 @@ mod tests {
     #[test]
     fn sidebar_shows_history_sessions() {
         let (_dir, mut app) = fixture();
-        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"), "session not visible");
+        assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"), "session not visible");
         assert!(found_after_frames(&mut app, vec![], "TODAY"), "time group not visible");
         assert!(found_after_frames(&mut app, vec![], "Sessions: 1"), "session count not visible");
     }
@@ -1342,14 +1344,14 @@ mod tests {
     #[test]
     fn session_disappears_when_its_folder_is_deleted() {
         let (dir, mut app) = fixture();
-        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
         std::fs::remove_dir_all(dir.path().join("work")).unwrap();
-        assert!(!found_after_frames(&mut app, vec![Message::Tick], "○ Fix webhook retry"), "row still shown");
+        assert!(!found_after_frames(&mut app, vec![Message::Tick], "Fix webhook retry"), "row still shown");
         assert!(found_after_frames(&mut app, vec![], "Sessions: 0"), "count not updated");
 
         // Restore the folder: the session comes back.
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
-        assert!(found_after_frames(&mut app, vec![Message::Tick], "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut app, vec![Message::Tick], "Fix webhook retry"));
     }
 }
 
