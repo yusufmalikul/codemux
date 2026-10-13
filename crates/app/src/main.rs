@@ -248,6 +248,7 @@ impl App {
                     last_output: Instant::now(),
                 });
                 self.selected = Selected::Tab(id);
+                self.reveal_tab(id);
                 self.error = None;
                 self.save_state();
                 focus
@@ -261,10 +262,26 @@ impl App {
 
     /// Show a tab: copy its latest screen, then give it keyboard focus.
     fn focus_tab(&mut self, id: u64) -> Task<Message> {
+        self.reveal_tab(id);
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
         let wakeup = term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Wakeup);
         tab.term.handle(term::Command::ProxyToBackend(wakeup));
         term::TerminalView::focus(tab.term.widget_id().clone())
+    }
+
+    /// Expand the workspace that holds a tab, so the selected tab is never
+    /// hidden inside a collapsed workspace.
+    fn reveal_tab(&mut self, id: u64) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        let ws = tab.session_id.as_deref().and_then(|s| self.workspace_of(s));
+        let collapsed = match ws {
+            Some(ws) => self.workspaces.iter_mut().find(|w| w.id == ws).map(|w| &mut w.collapsed),
+            None => Some(&mut self.default_collapsed),
+        };
+        if let Some(c) = collapsed.filter(|c| **c) {
+            *c = false;
+            self.workspaces_changed();
+        }
     }
 
     fn tab_for_session(&self, sid: &str) -> Option<u64> {
@@ -592,39 +609,34 @@ impl App {
         // Explicit Fill: `lazy` reports Shrink, so the column would not grow by itself.
         let mut list = Column::new().spacing(2).width(Length::Fill);
 
-        if !self.tabs.is_empty() {
-            list = list.push(section("ACTIVE"));
-            for tab in &self.tabs {
+        // The tree is large. Rebuild it only when its inputs change, not on
+        // every PTY event. Open tabs are part of the inputs, but only their
+        // shown text, which changes rarely.
+        let tabs: Vec<TabRow> = self
+            .tabs
+            .iter()
+            .map(|tab| {
                 let (title, folder) = self.tab_title(tab);
                 let (icon, status) = self.tab_status(tab);
-                let selected = self.selected == Selected::Tab(tab.id);
-                let line = row![
-                    button(column![text(format!("{icon} {title}")).size(15), text(format!("   {folder} · {status}")).size(13)])
-                        .on_press(Message::SelectTab(tab.id))
-                        .width(Length::Fill)
-                        // Green marks a running tab; the selected one stays blue so it still stands out.
-                        .style(if selected { button::primary } else { button::success }),
-                    button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(tab.id)).style(close_style),
-                ]
-                // Keep the close button clear of the scrollbar on the right.
-                .spacing(4)
-                .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 })
-                .align_y(iced::Alignment::Center);
-                list = list.push(line);
-            }
-        }
-
-        // The history list is large. Rebuild it only when its inputs change,
-        // not on every PTY event.
-        let active: Vec<String> = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
+                TabRow {
+                    id: tab.id,
+                    session: tab.session_id.clone(),
+                    title,
+                    folder,
+                    icon,
+                    status,
+                    selected: self.selected == Selected::Tab(tab.id),
+                }
+            })
+            .collect();
         let selected_session = match &self.selected {
             Selected::Session(s) => Some(s.clone()),
             _ => None,
         };
         let minute = Local::now().timestamp() / 60;
         let deps =
-            (self.index_version, self.workspaces_version, self.search.clone(), selected_session, self.previously_open.clone(), active, minute);
-        list = list.push(lazy(deps, move |(_, _, _, _, _, active, _)| self.history_list(active)));
+            (self.index_version, self.workspaces_version, self.search.clone(), selected_session, self.previously_open.clone(), tabs, minute);
+        list = list.push(lazy(deps, move |(_, _, _, _, _, tabs, _)| self.history_list(tabs)));
 
         let workspace_bar: Element<'_, Message> = match &self.new_workspace {
             Some(name) => row![
@@ -665,8 +677,10 @@ impl App {
         .into()
     }
 
-    fn history_list(&self, active: &[String]) -> Element<'static, Message> {
-        let active: HashSet<&str> = active.iter().map(String::as_str).collect();
+    /// The sidebar tree: each workspace with its open tabs first, then its
+    /// other sessions. A session open in a tab is shown only as that tab.
+    fn history_list(&self, tabs: &[TabRow]) -> Element<'static, Message> {
+        let active: HashSet<&str> = tabs.iter().filter_map(|t| t.session.as_deref()).collect();
         let mut list = Column::new().spacing(2).width(Length::Fill);
         let q = self.search.to_lowercase();
         let matches = |m: &SessionMeta| {
@@ -676,17 +690,22 @@ impl App {
                     .flatten()
                     .any(|s| s.to_lowercase().contains(&q))
         };
+        let tab_matches = |t: &TabRow| match t.session.as_deref().and_then(|s| self.index.listed(s)) {
+            Some(m) => matches(m),
+            None => q.is_empty() || [&t.title, &t.folder].iter().any(|s| s.to_lowercase().contains(&q)),
+        };
 
         // While searching, open every workspace so no match is hidden.
         let searching = !q.is_empty();
 
-        // Sessions open in a tab show under ACTIVE, not in their workspace,
-        // but they still count toward it.
-        let active_count = |ids: &mut dyn Iterator<Item = &str>| {
-            ids.filter(|s| active.contains(s)).filter_map(|s| self.index.listed(s)).filter(|m| matches(m)).count()
+        // Tabs per workspace. Tabs with no session, or a session in no
+        // workspace, belong to the default workspace.
+        let ws_tabs = |id: Option<u64>| -> Vec<&TabRow> {
+            tabs.iter().filter(|t| t.session.as_deref().and_then(|s| self.workspace_of(s)) == id).filter(|t| tab_matches(t)).collect()
         };
 
         for ws in &self.workspaces {
+            let open_tabs = ws_tabs(Some(ws.id));
             let mut items: Vec<&SessionMeta> = ws
                 .sessions
                 .iter()
@@ -694,14 +713,16 @@ impl App {
                 .filter_map(|s| self.index.listed(s))
                 .filter(|m| matches(m))
                 .collect();
-            if searching && items.is_empty() {
+            if searching && items.is_empty() && open_tabs.is_empty() {
                 continue;
             }
             items.sort_by_key(|m| std::cmp::Reverse(m.sort_time()));
             let open = searching || !ws.collapsed;
-            let count = items.len() + active_count(&mut ws.sessions.iter().map(String::as_str));
-            list = list.push(workspace_header(Some(ws.id), &ws.name, count, open));
+            list = list.push(workspace_header(Some(ws.id), &ws.name, items.len() + open_tabs.len(), open_tabs.len(), open));
             if open {
+                for t in open_tabs {
+                    list = list.push(indent(tab_row(t)));
+                }
                 for m in items {
                     list = list.push(indent(self.session_row(m)));
                 }
@@ -728,11 +749,16 @@ impl App {
             })
             .take(HISTORY_LIMIT)
             .collect();
+        let open_tabs = ws_tabs(None);
         let open = searching || !self.default_collapsed;
-        let active_default = active_count(&mut active.iter().copied().filter(|s| !in_workspace.contains(s)));
-        list = list.push(workspace_header(None, DEFAULT_WORKSPACE, prev.len() + rest.len() + active_default, open));
+        let count = prev.len() + rest.len() + open_tabs.len();
+        list = list.push(workspace_header(None, DEFAULT_WORKSPACE, count, open_tabs.len(), open));
         if !open {
             return list.into();
+        }
+
+        for t in open_tabs {
+            list = list.push(indent(tab_row(t)));
         }
 
         if !prev.is_empty() {
@@ -867,10 +893,12 @@ fn section(label: &'static str) -> Element<'static, Message> {
 /// A workspace row in the sidebar tree: an arrow, the name, and the number
 /// of sessions. Click to collapse or expand. User workspaces also get a
 /// delete button; the default workspace cannot be removed.
-fn workspace_header(id: Option<u64>, name: &str, count: usize, open: bool) -> Element<'static, Message> {
+fn workspace_header(id: Option<u64>, name: &str, count: usize, open_tabs: usize, open: bool) -> Element<'static, Message> {
     let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
     let arrow = if open { "▾" } else { "▸" };
-    let toggle = button(text(format!("{arrow} {name}  ({count})")).size(15).font(bold))
+    // Shown even when collapsed, so open tabs are never out of sight.
+    let badge = if open_tabs > 0 { format!("  ● {open_tabs} open") } else { String::new() };
+    let toggle = button(text(format!("{arrow} {name}  ({count}){badge}")).size(15).font(bold))
         .on_press(Message::ToggleWorkspace(id))
         .width(Length::Fill)
         .style(button::text);
@@ -881,6 +909,35 @@ fn workspace_header(id: Option<u64>, name: &str, count: usize, open: bool) -> El
     container(line.padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 }))
         .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
         .into()
+}
+
+/// What the sidebar shows for one open tab. Hashable, so the lazy tree
+/// rebuilds only when this text changes.
+#[derive(Clone, Hash)]
+struct TabRow {
+    id: u64,
+    session: Option<String>,
+    title: String,
+    folder: String,
+    icon: &'static str,
+    status: &'static str,
+    selected: bool,
+}
+
+fn tab_row(t: &TabRow) -> Element<'static, Message> {
+    row![
+        button(column![text(format!("{} {}", t.icon, t.title)).size(15), text(format!("   {} · {}", t.folder, t.status)).size(13)])
+            .on_press(Message::SelectTab(t.id))
+            .width(Length::Fill)
+            // Green marks a running tab; the selected one stays blue so it still stands out.
+            .style(if t.selected { button::primary } else { button::success }),
+        button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(t.id)).style(close_style),
+    ]
+    // Keep the close button clear of the scrollbar on the right.
+    .spacing(4)
+    .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 })
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
@@ -1119,6 +1176,37 @@ mod tests {
         assert!(found_after_frames(&mut again, msgs, "○ Fix webhook retry"));
         assert!(found_after_frames(&mut again, vec![], "▾ Default  (1)"));
         assert!(!found_after_frames(&mut again, vec![Message::ToggleWorkspace(None)], "○ Fix webhook retry"), "default not collapsed");
+    }
+
+    /// A session open in a tab stays inside its workspace (there is no
+    /// separate ACTIVE list). A collapsed workspace shows how many tabs are
+    /// open in it, and selecting such a tab opens the workspace again.
+    #[test]
+    fn open_tab_stays_inside_its_workspace() {
+        let (_dir, mut app) = fixture();
+        for m in [
+            Message::NewWorkspaceStart,
+            Message::NewWorkspaceName("Backend".into()),
+            Message::NewWorkspaceCreate,
+            Message::MoveSession("s1".into(), Some(1)),
+            Message::NewTerminal,
+        ] {
+            let _ = app.update(m);
+        }
+        app.tabs[0].session_id = Some("s1".into());
+        let tab = app.tabs[0].id;
+
+        assert!(!found_after_frames(&mut app, vec![], "ACTIVE"), "separate ACTIVE list still shown");
+        assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"), "open badge missing");
+        assert!(found_after_frames(&mut app, vec![], "▸ Fix webhook retry"), "tab row not in its workspace");
+        assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+
+        let msgs = vec![Message::ToggleWorkspace(Some(1))];
+        assert!(!found_after_frames(&mut app, msgs, "▸ Fix webhook retry"), "not collapsed");
+        assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"));
+
+        assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], "▸ Fix webhook retry"), "not opened on select");
+        assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"));
     }
 
     #[test]
