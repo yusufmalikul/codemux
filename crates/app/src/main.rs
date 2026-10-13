@@ -90,12 +90,15 @@ struct App {
     scale_factor: f32,
     /// Session waiting for "Hapus permanen" confirmation.
     confirm_delete: Option<String>,
+    /// Privacy: hide all session rows in the sidebar (saved in state.json).
+    hide_sessions: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     Terminal(term::Event),
     Tick,
+    ToggleHideSessions,
     /// The window is up; macOS resets the Dock icon during launch, so set it now.
     WindowOpened,
     NewSession,
@@ -124,7 +127,8 @@ impl App {
     }
 
     fn with_paths(projects_dir: Option<PathBuf>, state_path: Option<PathBuf>) -> Self {
-        let previously_open = state_path.as_deref().map(AppState::load).unwrap_or_default().open_sessions;
+        let state = state_path.as_deref().map(AppState::load).unwrap_or_default();
+        let previously_open = state.open_sessions;
         let mut app = Self {
             tabs: Vec::new(),
             selected: Selected::None,
@@ -139,6 +143,7 @@ impl App {
             error: None,
             scale_factor: 1.0,
             confirm_delete: None,
+            hide_sessions: state.hide_sessions,
         };
         app.refresh_index();
         app
@@ -155,7 +160,7 @@ impl App {
     fn save_state(&self) {
         let Some(path) = &self.state_path else { return };
         let open_sessions = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
-        let _ = AppState { version: 0, open_sessions }.save(path);
+        let _ = AppState { version: 0, open_sessions, hide_sessions: self.hide_sessions }.save(path);
     }
 
     fn spawn(&mut self, kind: TabKind, spec: LaunchSpec, session_id: Option<String>) -> Task<Message> {
@@ -341,6 +346,10 @@ impl App {
                 }
             }
             Message::Search(s) => self.search = s,
+            Message::ToggleHideSessions => {
+                self.hide_sessions = !self.hide_sessions;
+                self.save_state();
+            }
             Message::DeleteAsk(sid) => self.confirm_delete = Some(sid),
             Message::DeleteCancel => self.confirm_delete = None,
             Message::DeleteConfirm(sid) => self.delete_session(&sid),
@@ -472,15 +481,24 @@ impl App {
         list = list.push(lazy(deps, move |(_, _, _, _, active, _)| self.history_list(active)));
 
         let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W tutup" } else { "Ctrl+Shift+N / T / W" };
+        let (hide_label, list): (_, Element<'_, Message>) = if self.hide_sessions {
+            ("Tampilkan", text("Sesi disembunyikan").size(12).into())
+        } else {
+            ("Sembunyikan", scrollable(list).height(Length::Fill).into())
+        };
         column![
-            text_input("Cari session…", &self.search).on_input(Message::Search).size(13),
+            row![
+                text_input("Cari session…", &self.search).on_input(Message::Search).size(13),
+                button(text(hide_label).size(12)).on_press(Message::ToggleHideSessions).style(button::secondary),
+            ]
+            .spacing(6),
             row![
                 button(text("+ Session baru").size(13)).on_press(Message::NewSession).width(Length::Fill),
                 button(text(">_ Terminal baru").size(13)).on_press(Message::NewTerminal).width(Length::Fill),
             ]
             .spacing(6),
             text(shortcut_hint).size(10),
-            scrollable(list).height(Length::Fill),
+            list,
         ]
         .spacing(8)
         .into()
@@ -771,6 +789,21 @@ mod tests {
         let _ = app.update(Message::DeleteConfirm("s1".into()));
         assert!(dir.path().join("projects/-tmp-proj/s1.jsonl").exists());
         assert!(app.error.is_some());
+    }
+
+    /// Privacy: the toggle hides every session row, and stays on after restart.
+    #[test]
+    fn hide_sessions_hides_rows_and_is_remembered() {
+        let (dir, mut app) = fixture();
+        let _ = app.update(Message::NewTerminal);
+        let msgs = vec![Message::ToggleHideSessions];
+        assert!(!found_after_frames(&mut app, msgs, "○ Fix webhook retry"), "history still visible");
+        assert!(!found_after_frames(&mut app, vec![], "AKTIF"), "active tabs still visible");
+        assert!(found_after_frames(&mut app, vec![], "Sesi disembunyikan"));
+
+        let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        assert!(!found_after_frames(&mut again, vec![], "○ Fix webhook retry"), "not remembered");
+        assert!(found_after_frames(&mut again, vec![Message::ToggleHideSessions], "○ Fix webhook retry"));
     }
 
     #[test]
