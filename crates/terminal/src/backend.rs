@@ -141,6 +141,8 @@ pub struct Backend {
     last_content: RenderableContent,
     pub(crate) url_regex: RegexSearch,
     child_pid: Option<u32>,
+    /// URI of a hovered OSC 8 hyperlink (its shown text is not the URL).
+    hovered_uri: Option<String>,
 }
 
 impl Backend {
@@ -196,6 +198,7 @@ impl Backend {
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
             child_pid,
+            hovered_uri: None,
         })
     }
 
@@ -261,13 +264,25 @@ impl Backend {
     ) {
         match link_action {
             LinkAction::Hover => {
-                self.last_content.hovered_hyperlink = self.regex_match_at(
-                    terminal,
-                    point,
-                    &mut self.url_regex.clone(),
-                );
+                // OSC 8 first (Claude Code uses it), then plain URLs in text.
+                match osc8_link_at(terminal, point) {
+                    Some((uri, range)) => {
+                        self.hovered_uri = Some(uri);
+                        self.last_content.hovered_hyperlink = Some(range);
+                    },
+                    None => {
+                        self.hovered_uri = None;
+                        self.last_content.hovered_hyperlink = self
+                            .regex_match_at(
+                                terminal,
+                                point,
+                                &mut self.url_regex.clone(),
+                            );
+                    },
+                }
             },
             LinkAction::Clear => {
+                self.hovered_uri = None;
                 self.last_content.hovered_hyperlink = None;
             },
             LinkAction::Open => {
@@ -276,22 +291,27 @@ impl Backend {
         };
     }
 
-    fn open_link(&self) {
-        if let Some(range) = &self.last_content.hovered_hyperlink {
-            let start = range.start();
-            let end = range.end();
-
-            let term = self.term.lock();
-            let grid = term.grid();
-            let mut url = String::from(grid.index(*start).c);
-            for indexed in grid.iter_from(*start) {
-                url.push(indexed.c);
-                if indexed.point == *end {
-                    break;
-                }
+    /// URL of the link under the mouse, if any.
+    pub(crate) fn hovered_link_url(&self) -> Option<String> {
+        if let Some(uri) = &self.hovered_uri {
+            return Some(uri.clone());
+        }
+        let range = self.last_content.hovered_hyperlink.as_ref()?;
+        let (start, end) = (*range.start(), *range.end());
+        let term = self.term.lock();
+        let grid = term.grid();
+        let mut url = String::from(grid.index(start).c);
+        for indexed in grid.iter_from(start) {
+            url.push(indexed.c);
+            if indexed.point == end {
+                break;
             }
-            drop(term);
+        }
+        Some(url)
+    }
 
+    fn open_link(&self) {
+        if let Some(url) = self.hovered_link_url() {
             let _ = open::that(url);
         }
     }
@@ -580,6 +600,35 @@ impl Backend {
     }
 }
 
+/// The OSC 8 hyperlink at `point`, with the range of cells on that line that
+/// share it (used to underline the whole link text).
+fn osc8_link_at(
+    term: &Term<EventProxy>,
+    point: Point,
+) -> Option<(String, RangeInclusive<Point>)> {
+    let grid = term.grid();
+    if point.line < grid.topmost_line() || point.line > grid.bottommost_line() {
+        return None;
+    }
+    let link = grid[point].hyperlink()?;
+    let row = &grid[point.line];
+    let same =
+        |col: usize| row[Column(col)].hyperlink().as_ref() == Some(&link);
+    let mut start = point.column.0;
+    while start > 0 && same(start - 1) {
+        start -= 1;
+    }
+    let mut end = point.column.0;
+    while end + 1 < grid.columns() && same(end + 1) {
+        end += 1;
+    }
+    Some((
+        link.uri().to_string(),
+        Point::new(point.line, Column(start))
+            ..=Point::new(point.line, Column(end)),
+    ))
+}
+
 /// Copied from alacritty/src/display/hint.rs:
 /// Iterate over all visible regex matches.
 fn visible_regex_match_iter<'a>(
@@ -726,6 +775,66 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn start_printer(text: &str) -> Backend {
+        let (tx, mut rx) = mpsc::channel(100);
+        std::thread::spawn(move || while rx.blocking_recv().is_some() {});
+        let settings = BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), format!("printf '{text}'; sleep 30")],
+            ..Default::default()
+        };
+        let mut backend = Backend::new(0, tx, settings).unwrap();
+        backend.handle(Command::Resize(
+            Some(Size::new(800.0, 400.0)),
+            Some(Size::new(10.0, 20.0)),
+        ));
+        backend
+    }
+
+    /// Hover at `col` on the first line until a link shows up (output is async).
+    fn hover_url(backend: &mut Backend, col: usize) -> Option<String> {
+        let start = Instant::now();
+        loop {
+            backend.handle(Command::ProcessLink(
+                LinkAction::Hover,
+                Point::new(Line(0), Column(col)),
+            ));
+            let url = backend.hovered_link_url();
+            if url.is_some() || start.elapsed() > Duration::from_secs(2) {
+                return url;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Claude Code prints links as OSC 8 hyperlinks: the shown text is not
+    /// the URL. ⌘+click must open the real URL.
+    #[test]
+    fn osc8_hyperlink_is_detected_on_hover() {
+        let mut backend = start_printer(
+            r"\033]8;;https://example.com/a\033\\click here\033]8;;\033\\ after",
+        );
+        assert_eq!(
+            hover_url(&mut backend, 2).as_deref(),
+            Some("https://example.com/a")
+        );
+        // Outside the link text: no link.
+        backend.handle(Command::ProcessLink(
+            LinkAction::Hover,
+            Point::new(Line(0), Column(13)),
+        ));
+        assert_eq!(backend.hovered_link_url(), None);
+    }
+
+    #[test]
+    fn plain_url_is_detected_on_hover() {
+        let mut backend = start_printer("see https://x.io/p ok");
+        assert_eq!(
+            hover_url(&mut backend, 6).as_deref(),
+            Some("https://x.io/p")
+        );
     }
 
     /// Not a pass/fail test: prints the cost of one sync with a full scrollback.
