@@ -822,7 +822,7 @@ impl App {
             sub.push(b.clone());
         }
         sub.push(relative_time(m.sort_time()));
-        button(column![text(format!("○ {}", m.title())).size(15), text(format!("   {}", sub.join(" · "))).size(13)])
+        button(row_label(format!("○ {}", m.title()), format!("   {}", sub.join(" · "))))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -975,7 +975,7 @@ struct TabRow {
 
 fn tab_row(t: &TabRow) -> Element<'static, Message> {
     row![
-        button(column![text(format!("{} {}", t.icon, t.title)).size(15), text(format!("   {} · {}", t.folder, t.status)).size(13)])
+        button(row_label(format!("{} {}", t.icon, t.title), format!("   {} · {}", t.folder, t.status)))
             .on_press(Message::SelectTab(t.id))
             .width(Length::Fill)
             // Green marks a running tab; the selected one stays blue so it still stands out.
@@ -984,6 +984,18 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// Two-line sidebar label. The name is bold and larger so it is easy to scan;
+/// the details line is smaller so it does not compete with it.
+fn row_label(title: String, details: String) -> Element<'static, Message> {
+    let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
+    column![
+        text(title).size(16).font(bold),
+        text(details).size(12),
+    ]
+    .spacing(2)
     .into()
 }
 
