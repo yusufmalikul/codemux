@@ -665,7 +665,10 @@ impl App {
         if let Some(e) = &self.error {
             col = col.push(container(text(e.clone()).size(12)).padding(8).style(container::danger));
         }
-        container(col.push(body)).width(Length::Fill).height(Length::Fill).into()
+        // Own row under the body, so it never covers terminal text.
+        let credit = container(text("Created by yusufmalikul").size(10)).width(Length::Fill).align_right(Length::Fill).padding([2, 8]);
+        let body = container(body).width(Length::Fill).height(Length::Fill);
+        container(col.push(body).push(credit)).width(Length::Fill).height(Length::Fill).into()
     }
 }
 
