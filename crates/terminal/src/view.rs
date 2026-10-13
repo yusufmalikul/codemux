@@ -386,10 +386,12 @@ impl<'a> TerminalView<'a> {
                 }
             },
             BindingAction::Copy => {
-                clipboard.write(
-                    ClipboardKind::Standard,
-                    self.term.backend.selectable_content(),
-                );
+                // Only copy our own selection. With no selection, keep the
+                // clipboard: Claude Code may have filled it itself (OSC 52).
+                let text = self.term.backend.selectable_content();
+                if !text.is_empty() {
+                    clipboard.write(ClipboardKind::Standard, text);
+                }
             },
             _ => {},
         };
@@ -840,6 +842,56 @@ impl BackgroundRect {
 
 #[cfg(test)]
 mod tests {
+    /// Copy must not wipe the clipboard when there is no selection.
+    /// With Claude Code, the mouse goes to Claude, which copies by itself
+    /// (OSC 52). An empty ⌘C used to overwrite that with "".
+    mod copy_tests {
+        use super::super::*;
+        use crate::settings::{BackendSettings, Settings};
+        use iced::keyboard::{key, Key, Location};
+
+        struct TestClipboard(Option<String>);
+        impl iced_graphics::core::Clipboard for TestClipboard {
+            fn read(&self, _: ClipboardKind) -> Option<String> {
+                self.0.clone()
+            }
+            fn write(&mut self, _: ClipboardKind, contents: String) {
+                self.0 = Some(contents);
+            }
+        }
+
+        #[test]
+        fn copy_without_selection_keeps_clipboard() {
+            let term = Terminal::new(
+                0,
+                Settings {
+                    backend: BackendSettings {
+                        program: "/bin/sh".into(),
+                        args: vec!["-c".into(), "sleep 30".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let view = TerminalView { term: &term };
+            let mut state = TerminalViewState::new();
+            state.keyboard_modifiers = Modifiers::COMMAND;
+            let mut clipboard = TestClipboard(Some("from claude".into()));
+            let event = iced::keyboard::Event::KeyPressed {
+                key: Key::Character("c".into()),
+                modified_key: Key::Character("c".into()),
+                physical_key: key::Physical::Code(key::Code::KeyC),
+                location: Location::Standard,
+                modifiers: Modifiers::COMMAND,
+                text: None,
+                repeat: false,
+            };
+            view.handle_keyboard_event(&mut state, &mut clipboard, &event);
+            assert_eq!(clipboard.0.as_deref(), Some("from claude"));
+        }
+    }
+
     use super::*;
 
     mod handle_left_button_pressed_tests {
