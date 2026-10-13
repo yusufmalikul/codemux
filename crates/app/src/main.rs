@@ -6,9 +6,9 @@ use codemux_core::detect::{self, ClaudeProc, ProcScanner};
 use codemux_core::launch::{self, ClaudeMode, LaunchSpec};
 use codemux_core::paths;
 use codemux_core::sessions::{Index, SessionMeta};
-use codemux_core::store::AppState;
+use codemux_core::store::{AppState, Workspace};
 use codemux_terminal as term;
-use iced::widget::{button, column, container, lazy, mouse_area, row, rule, scrollable, text, text_input, Column};
+use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -23,6 +23,10 @@ const SIDEBAR_MIN: f32 = 180.0;
 const SIDEBAR_MAX: f32 = 700.0;
 /// Main color for buttons and the selected row.
 const ACCENT: iced::Color = iced::Color::from_rgb8(0x35, 0x3d, 0xb0);
+const DEFAULT_WORKSPACE: &str = "Default";
+/// Left indent of rows inside a workspace, so the sidebar reads as a tree.
+const TREE_INDENT: f32 = 16.0;
+const WORKSPACE_INPUT: &str = "new-workspace-name";
 
 fn main() -> iced::Result {
     launch::clean_inherited_env();
@@ -101,6 +105,27 @@ struct App {
     sidebar_width: f32,
     /// True while the user drags the sidebar divider.
     resizing: bool,
+    /// User-made workspaces (saved in state.json). Sessions in none of them
+    /// are in the default workspace.
+    workspaces: Vec<Workspace>,
+    default_collapsed: bool,
+    /// Bumped when workspaces change, so the lazy sidebar knows to rebuild.
+    workspaces_version: u64,
+    /// Name typed for a new workspace. Some while the name box is shown.
+    new_workspace: Option<String>,
+}
+
+/// One choice in the "Workspace" picker. `id` None is the default workspace.
+#[derive(Debug, Clone, PartialEq)]
+struct WorkspaceChoice {
+    id: Option<u64>,
+    name: String,
+}
+
+impl std::fmt::Display for WorkspaceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +153,16 @@ enum Message {
     DeleteAsk(String),
     DeleteConfirm(String),
     DeleteCancel,
+    NewWorkspaceStart,
+    NewWorkspaceName(String),
+    NewWorkspaceCreate,
+    NewWorkspaceCancel,
+    /// Collapse or expand a workspace. None is the default workspace.
+    ToggleWorkspace(Option<u64>),
+    /// Remove a workspace. Its sessions go back to the default workspace.
+    DeleteWorkspace(u64),
+    /// Move a session to a workspace. None is the default workspace.
+    MoveSession(String, Option<u64>),
 }
 
 impl App {
@@ -159,6 +194,10 @@ impl App {
             hide_sidebar: state.hide_sidebar,
             sidebar_width: state.sidebar_width.unwrap_or(SIDEBAR_DEFAULT).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             resizing: false,
+            workspaces: state.workspaces,
+            default_collapsed: state.default_collapsed,
+            workspaces_version: 0,
+            new_workspace: None,
         };
         app.refresh_index();
         app
@@ -177,6 +216,8 @@ impl App {
         let open_sessions = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
         let _ = AppState { version: 0, open_sessions, hide_sidebar: self.hide_sidebar,
             sidebar_width: Some(self.sidebar_width),
+            workspaces: self.workspaces.clone(),
+            default_collapsed: self.default_collapsed,
         }
         .save(path);
     }
@@ -378,6 +419,43 @@ impl App {
             Message::DeleteAsk(sid) => self.confirm_delete = Some(sid),
             Message::DeleteCancel => self.confirm_delete = None,
             Message::DeleteConfirm(sid) => self.delete_session(&sid),
+            Message::NewWorkspaceStart => {
+                self.new_workspace = Some(String::new());
+                return iced::widget::operation::focus(iced::widget::Id::new(WORKSPACE_INPUT));
+            }
+            Message::NewWorkspaceName(name) => self.new_workspace = Some(name),
+            Message::NewWorkspaceCancel => self.new_workspace = None,
+            Message::NewWorkspaceCreate => {
+                let name = self.new_workspace.take().unwrap_or_default().trim().to_string();
+                if !name.is_empty() {
+                    let id = self.workspaces.iter().map(|w| w.id).max().unwrap_or(0) + 1;
+                    self.workspaces.push(Workspace { id, name, ..Default::default() });
+                    self.workspaces_changed();
+                }
+            }
+            Message::ToggleWorkspace(None) => {
+                self.default_collapsed = !self.default_collapsed;
+                self.workspaces_changed();
+            }
+            Message::ToggleWorkspace(Some(id)) => {
+                if let Some(w) = self.workspaces.iter_mut().find(|w| w.id == id) {
+                    w.collapsed = !w.collapsed;
+                    self.workspaces_changed();
+                }
+            }
+            Message::DeleteWorkspace(id) => {
+                self.workspaces.retain(|w| w.id != id);
+                self.workspaces_changed();
+            }
+            Message::MoveSession(sid, to) => {
+                for w in &mut self.workspaces {
+                    w.sessions.retain(|s| s != &sid);
+                }
+                if let Some(w) = to.and_then(|id| self.workspaces.iter_mut().find(|w| w.id == id)) {
+                    w.sessions.push(sid);
+                }
+                self.workspaces_changed();
+            }
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
                 for tab in &mut self.tabs {
@@ -392,6 +470,21 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    fn workspaces_changed(&mut self) {
+        self.workspaces_version += 1;
+        self.save_state();
+    }
+
+    fn workspace_of(&self, sid: &str) -> Option<u64> {
+        self.workspaces.iter().find(|w| w.sessions.iter().any(|s| s == sid)).map(|w| w.id)
+    }
+
+    fn workspace_choices(&self) -> Vec<WorkspaceChoice> {
+        std::iter::once(WorkspaceChoice { id: None, name: DEFAULT_WORKSPACE.into() })
+            .chain(self.workspaces.iter().map(|w| WorkspaceChoice { id: Some(w.id), name: w.name.clone() }))
+            .collect()
     }
 
     /// Permanently delete a session file. Refused while it runs in a tab.
@@ -409,6 +502,10 @@ impl App {
             Ok(()) => {
                 self.error = None;
                 self.previously_open.retain(|s| s != sid);
+                for w in &mut self.workspaces {
+                    w.sessions.retain(|s| s != sid);
+                }
+                self.workspaces_version += 1;
                 if self.selected == Selected::Session(sid.to_string()) {
                     self.selected = Selected::None;
                 }
@@ -525,8 +622,28 @@ impl App {
             _ => None,
         };
         let minute = Local::now().timestamp() / 60;
-        let deps = (self.index_version, self.search.clone(), selected_session, self.previously_open.clone(), active, minute);
-        list = list.push(lazy(deps, move |(_, _, _, _, active, _)| self.history_list(active)));
+        let deps =
+            (self.index_version, self.workspaces_version, self.search.clone(), selected_session, self.previously_open.clone(), active, minute);
+        list = list.push(lazy(deps, move |(_, _, _, _, _, active, _)| self.history_list(active)));
+
+        let workspace_bar: Element<'_, Message> = match &self.new_workspace {
+            Some(name) => row![
+                text_input("Workspace name…", name)
+                    .id(iced::widget::Id::new(WORKSPACE_INPUT))
+                    .on_input(Message::NewWorkspaceName)
+                    .on_submit(Message::NewWorkspaceCreate)
+                    .size(15),
+                button(text("Add").size(14)).on_press(Message::NewWorkspaceCreate),
+                button(text("Cancel").size(14)).on_press(Message::NewWorkspaceCancel).style(button::secondary),
+            ]
+            .spacing(6)
+            .into(),
+            None => button(text("+ New workspace").size(15))
+                .on_press(Message::NewWorkspaceStart)
+                .width(Length::Fill)
+                .style(button::secondary)
+                .into(),
+        };
 
         let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W close · ⌘B hide" } else { "Ctrl+Shift+N / T / W / B" };
         column![
@@ -540,6 +657,7 @@ impl App {
                 button(text(">_ New terminal").size(15)).on_press(Message::NewTerminal).width(Length::Fill),
             ]
             .spacing(6),
+            workspace_bar,
             row![text(shortcut_hint).size(12).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(12)],
             scrollable(list).height(Length::Fill),
         ]
@@ -559,35 +677,71 @@ impl App {
                     .any(|s| s.to_lowercase().contains(&q))
         };
 
+        // While searching, open every workspace so no match is hidden.
+        let searching = !q.is_empty();
+
+        for ws in &self.workspaces {
+            let mut items: Vec<&SessionMeta> = ws
+                .sessions
+                .iter()
+                .filter(|s| !active.contains(s.as_str()))
+                .filter_map(|s| self.index.listed(s))
+                .filter(|m| matches(m))
+                .collect();
+            if searching && items.is_empty() {
+                continue;
+            }
+            items.sort_by_key(|m| std::cmp::Reverse(m.sort_time()));
+            let open = searching || !ws.collapsed;
+            list = list.push(workspace_header(Some(ws.id), &ws.name, items.len(), open));
+            if open {
+                for m in items {
+                    list = list.push(indent(self.session_row(m)));
+                }
+            }
+        }
+
+        let in_workspace: HashSet<&str> =
+            self.workspaces.iter().flat_map(|w| w.sessions.iter().map(String::as_str)).collect();
+        let prev_set: HashSet<&str> = self.previously_open.iter().map(String::as_str).collect();
         let prev: Vec<&SessionMeta> = self
             .previously_open
             .iter()
-            .filter(|s| !active.contains(s.as_str()))
+            .filter(|s| !active.contains(s.as_str()) && !in_workspace.contains(s.as_str()))
             .filter_map(|s| self.index.listed(s))
             .filter(|m| matches(m))
             .collect();
+        let rest: Vec<&SessionMeta> = self
+            .index
+            .sessions()
+            .into_iter()
+            .filter(|m| {
+                let id = m.id.as_str();
+                !active.contains(id) && !prev_set.contains(id) && !in_workspace.contains(id) && matches(m)
+            })
+            .take(HISTORY_LIMIT)
+            .collect();
+        let open = searching || !self.default_collapsed;
+        list = list.push(workspace_header(None, DEFAULT_WORKSPACE, prev.len() + rest.len(), open));
+        if !open {
+            return list.into();
+        }
+
         if !prev.is_empty() {
-            list = list.push(section("PREVIOUSLY OPEN"));
+            list = list.push(indent(section("PREVIOUSLY OPEN")));
             for m in prev {
-                list = list.push(self.session_row(m));
+                list = list.push(indent(self.session_row(m)));
             }
         }
 
         let mut group = "";
-        let prev_set: HashSet<&str> = self.previously_open.iter().map(String::as_str).collect();
-        for m in self
-            .index
-            .sessions()
-            .into_iter()
-            .filter(|m| !active.contains(m.id.as_str()) && !prev_set.contains(m.id.as_str()) && matches(m))
-            .take(HISTORY_LIMIT)
-        {
+        for m in rest {
             let g = time_group(m.sort_time());
             if g != group {
                 group = g;
-                list = list.push(section(g));
+                list = list.push(indent(section(g)));
             }
-            list = list.push(self.session_row(m));
+            list = list.push(indent(self.session_row(m)));
         }
 
         list.into()
@@ -642,6 +796,18 @@ impl App {
                         col = col.push(text(format!("Last prompt: {p}")).size(12));
                     }
                     col = col.push(text(format!("ID: {}", m.id)).size(11));
+                    let choices = self.workspace_choices();
+                    let current = self.workspace_of(&m.id);
+                    let selected = choices.iter().find(|c| c.id == current).cloned();
+                    let sid = m.id.clone();
+                    col = col.push(
+                        row![
+                            text("Workspace:").size(12),
+                            pick_list(choices, selected, move |c| Message::MoveSession(sid.clone(), c.id)).text_size(13),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    );
                     let actions: Element<'_, Message> = if self.confirm_delete.as_deref() == Some(m.id.as_str()) {
                         row![
                             text("Delete this session file? This cannot be undone.").size(12),
@@ -688,6 +854,29 @@ fn section(label: &'static str) -> Element<'static, Message> {
     // rows of the group before it.
     let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
     container(text(label).size(14).font(bold)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
+}
+
+/// A workspace row in the sidebar tree: an arrow, the name, and the number
+/// of sessions. Click to collapse or expand. User workspaces also get a
+/// delete button; the default workspace cannot be removed.
+fn workspace_header(id: Option<u64>, name: &str, count: usize, open: bool) -> Element<'static, Message> {
+    let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
+    let arrow = if open { "▾" } else { "▸" };
+    let toggle = button(text(format!("{arrow} {name}  ({count})")).size(15).font(bold))
+        .on_press(Message::ToggleWorkspace(id))
+        .width(Length::Fill)
+        .style(button::text);
+    let mut line = row![toggle].spacing(4).align_y(iced::Alignment::Center);
+    if let Some(id) = id {
+        line = line.push(button(text("✕").size(13)).padding([4, 10]).on_press(Message::DeleteWorkspace(id)).style(close_style));
+    }
+    container(line.padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 }))
+        .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
+        .into()
+}
+
+fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
+    container(e).padding(iced::Padding { left: TREE_INDENT, ..iced::Padding::ZERO }).into()
 }
 
 fn folder_label(p: &std::path::Path) -> String {
@@ -888,6 +1077,50 @@ mod tests {
         let again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
         assert_eq!(again.sidebar_width, 450.0);
         assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+    }
+
+    /// A new workspace shows in the sidebar. A session moved into it is
+    /// listed under it, hidden when it is collapsed, and all of it is
+    /// remembered after restart. Deleting it sends the session back to Default.
+    #[test]
+    fn workspaces_group_sessions_as_a_collapsible_tree() {
+        let (dir, mut app) = fixture();
+        assert!(found_after_frames(&mut app, vec![], "▾ Default  (1)"), "no default workspace");
+
+        let msgs = vec![
+            Message::NewWorkspaceStart,
+            Message::NewWorkspaceName("  Backend ".into()),
+            Message::NewWorkspaceCreate,
+            Message::MoveSession("s1".into(), Some(1)),
+        ];
+        assert!(found_after_frames(&mut app, msgs, "▾ Backend  (1)"), "workspace not shown");
+        assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+
+        assert!(!found_after_frames(&mut app, vec![Message::ToggleWorkspace(Some(1))], "○ Fix webhook retry"), "not collapsed");
+        assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)"));
+        // Search opens collapsed workspaces so matches are not hidden.
+        assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "○ Fix webhook retry"));
+        let _ = app.update(Message::Search(String::new()));
+
+        let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        assert!(found_after_frames(&mut again, vec![], "▸ Backend  (1)"), "not remembered");
+        assert!(!found_after_frames(&mut again, vec![], "○ Fix webhook retry"));
+
+        let msgs = vec![Message::DeleteWorkspace(1)];
+        assert!(found_after_frames(&mut again, msgs, "○ Fix webhook retry"));
+        assert!(found_after_frames(&mut again, vec![], "▾ Default  (1)"));
+        assert!(!found_after_frames(&mut again, vec![Message::ToggleWorkspace(None)], "○ Fix webhook retry"), "default not collapsed");
+    }
+
+    #[test]
+    fn empty_workspace_name_is_ignored() {
+        let (_dir, mut app) = fixture();
+        for m in [Message::NewWorkspaceStart, Message::NewWorkspaceName("   ".into()), Message::NewWorkspaceCreate] {
+            let _ = app.update(m);
+        }
+        assert!(app.workspaces.is_empty());
+        assert!(app.new_workspace.is_none());
     }
 
     #[test]

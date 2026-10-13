@@ -19,6 +19,24 @@ pub struct AppState {
     /// Sidebar width in logical pixels. None means the default width.
     #[serde(default)]
     pub sidebar_width: Option<f32>,
+    /// User-made workspaces. Sessions in none of them belong to the default workspace.
+    #[serde(default)]
+    pub workspaces: Vec<Workspace>,
+    /// The default workspace is collapsed in the sidebar.
+    #[serde(default)]
+    pub default_collapsed: bool,
+}
+
+/// A named group of sessions, shown as a folder in the sidebar tree.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: u64,
+    pub name: String,
+    /// Session IDs in this workspace. A session is in at most one workspace.
+    #[serde(default)]
+    pub sessions: Vec<String>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 impl AppState {
@@ -53,12 +71,16 @@ mod tests {
     fn save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub").join("state.json");
-        let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sidebar: true, sidebar_width: Some(420.0) };
+        let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sidebar: true, sidebar_width: Some(420.0),
+            workspaces: vec![Workspace { id: 1, name: "Work".into(), sessions: vec!["a".into()], collapsed: true }],
+            default_collapsed: true };
         s.save(&p).unwrap();
         let loaded = AppState::load(&p);
         assert_eq!(loaded.open_sessions, s.open_sessions);
         assert!(loaded.hide_sidebar);
         assert_eq!(loaded.sidebar_width, Some(420.0));
+        assert_eq!(loaded.workspaces, s.workspaces);
+        assert!(loaded.default_collapsed);
         assert_eq!(loaded.version, STATE_VERSION);
         assert!(!p.with_extension("tmp").exists());
     }
