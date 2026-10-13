@@ -33,7 +33,8 @@ terminal Claude Code di kanan.
 
 - Bukan pengganti terminal umum. Tab "Terminal baru" (bagian 11.5) memang berisi shell biasa,
   tapi tujuannya hanya untuk memulai Claude Code. Tidak ada fitur terminal lanjutan (split, profil, dsb).
-- Tidak mengubah, menghapus, atau mengirim file session Claude Code ke mana pun.
+- Tidak mengubah atau mengirim file session Claude Code ke mana pun. Menghapus hanya atas perintah user
+  (bagian 11.6).
 - Tidak memanggil API Claude/Anthropic secara langsung.
 - Tidak mendukung session di dalam WSL (lihat bagian 14).
 - Tidak ada sinkronisasi antar komputer.
@@ -102,7 +103,7 @@ terminal Claude Code di kanan.
   - Judul (bagian 8.3)
   - Baris kecil: nama folder proyek · branch · waktu relatif ("2m", "08:10", "kemarin")
 - Menu klik kanan: Buka, Pin/Lepas pin, Ganti nama (hanya label lokal di app), Arsipkan,
-  Salin session ID, Buka folder, Hentikan.
+  Salin session ID, Buka folder, Hentikan, Hapus (bagian 11.6).
 - Session yang diarsipkan disembunyikan, tapi bisa ditampilkan lewat filter.
 
 ### 6.2 Area kanan
@@ -185,7 +186,8 @@ Setiap baris file `.jsonl` adalah satu objek JSON dengan field `type`. Yang dipa
 
 ### 8.4 Aturan parser
 
-- **Read-only.** App tidak pernah menulis ke `~/.claude/projects/`.
+- **Read-only**, dengan satu pengecualian: menghapus session atas perintah user (bagian 11.6).
+  App tidak pernah mengubah isi file session.
 - Format ini **bukan API resmi** dan bisa berubah. Karena itu:
   - Parser ada di satu modul (`core::sessions::parse`), dengan test dari file contoh (fixture).
   - Baris yang rusak atau `type` yang tidak dikenal dilewati, bukan error.
@@ -286,6 +288,17 @@ Disimpan di folder data per OS (crate `directories`):
    di tab yang sama menghubungkan tab ke session baru.
 6. Saat shell keluar (`exit`), tab ditutup.
 
+### 11.6 Menghapus session
+
+1. User memilih session, lalu menekan **Hapus**. App meminta konfirmasi: "Hapus permanen" atau "Batal".
+2. Yang dihapus: `<projects>/<folder>/<id>.jsonl` dan folder `<projects>/<folder>/<id>/` (transcript subagent).
+3. Pengaman:
+   - Path harus tepat `<projects>/<folder>/<id>.jsonl` setelah di-resolve (tanpa `..` atau symlink keluar).
+     Selain itu ditolak.
+   - Session yang sedang berjalan di tab app tidak bisa dihapus. Tab harus ditutup dulu.
+   - (Belum) Tolak juga kalau session terdeteksi berjalan di luar app (bagian 7).
+4. Setelah dihapus, session hilang dari sidebar dan dari "Terbuka sebelumnya". Tidak bisa di-resume lagi.
+
 ## 12. Widget terminal (`crates/terminal`)
 
 Diawali dari kode `iced_term` 0.8 (MIT). Atribusi dicantumkan di `NOTICE` dan di kepala file yang disalin.
@@ -378,7 +391,7 @@ CI menjalankan semua test di macOS, Windows, dan Linux.
 ## 16. Privasi dan keamanan
 
 - Semua data tetap di komputer user. **Tidak ada jaringan, tidak ada telemetry.**
-- File session hanya dibaca, tidak pernah diubah.
+- File session hanya dibaca, tidak pernah diubah. Dihapus hanya atas perintah user, setelah konfirmasi.
 - Hook hanya dipasang dengan persetujuan user, setelah perubahannya ditampilkan.
 - Fixture test tidak boleh berisi data asli (kode, secret, email).
 - README menjelaskan semua hal di atas dengan jelas.
@@ -406,6 +419,7 @@ CI menjalankan semua test di macOS, Windows, dan Linux.
 Sudah ada:
 - Workspace `crates/core`, `crates/terminal` (dari iced_term 0.8, sudah memakai alacritty_terminal 0.26), `crates/app`.
 - Sidebar: Aktif, Terbuka sebelumnya, riwayat per waktu, kotak cari.
+- Hapus session (11.6) dengan konfirmasi.
 - Session baru (pilih folder → `claude --session-id`), Terminal baru + deteksi Claude, Lanjutkan (`claude --resume`).
 - Status cadangan: ● bekerja (ada output < 2 detik), ◐ menunggu, ▸ shell.
 - `state.json` disimpan secara atomic setiap ada perubahan.

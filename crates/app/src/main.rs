@@ -71,6 +71,8 @@ struct App {
     error: Option<String>,
     /// Window scale factor, passed to every terminal (trackpad scroll speed).
     scale_factor: f32,
+    /// Session waiting for "Hapus permanen" confirmation.
+    confirm_delete: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +90,9 @@ enum Message {
     Search(String),
     SelectIndex(usize),
     ScaleFactor(f32),
+    DeleteAsk(String),
+    DeleteConfirm(String),
+    DeleteCancel,
 }
 
 impl App {
@@ -114,6 +119,7 @@ impl App {
             search: String::new(),
             error: None,
             scale_factor: 1.0,
+            confirm_delete: None,
         };
         app.refresh_index();
         app
@@ -302,6 +308,7 @@ impl App {
                     self.selected = Selected::Tab(id);
                     return self.focus_tab(id);
                 }
+                self.confirm_delete = None;
                 self.selected = Selected::Session(sid);
             }
             Message::Resume(sid) => return self.resume(sid),
@@ -312,6 +319,9 @@ impl App {
                 }
             }
             Message::Search(s) => self.search = s,
+            Message::DeleteAsk(sid) => self.confirm_delete = Some(sid),
+            Message::DeleteCancel => self.confirm_delete = None,
+            Message::DeleteConfirm(sid) => self.delete_session(&sid),
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
                 for tab in &mut self.tabs {
@@ -326,6 +336,31 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Permanently delete a session file. Refused while it runs in a tab.
+    fn delete_session(&mut self, sid: &str) {
+        self.confirm_delete = None;
+        if self.tab_for_session(sid).is_some() {
+            self.error = Some("Session masih berjalan di tab. Tutup tab-nya dulu.".into());
+            return;
+        }
+        let (Some(dir), Some(path)) = (self.projects_dir.clone(), self.index.get(sid).map(|m| m.path.clone())) else {
+            self.error = Some("Session tidak ditemukan.".into());
+            return;
+        };
+        match codemux_core::sessions::delete_session(&dir, &path) {
+            Ok(()) => {
+                self.error = None;
+                self.previously_open.retain(|s| s != sid);
+                if self.selected == Selected::Session(sid.to_string()) {
+                    self.selected = Selected::None;
+                }
+                self.refresh_index();
+                self.save_state();
+            }
+            Err(e) => self.error = Some(format!("Gagal menghapus session: {e}")),
+        }
     }
 
     fn close_tab(&mut self, id: u64) -> Task<Message> {
@@ -524,7 +559,24 @@ impl App {
                         col = col.push(text(format!("Prompt terakhir: {p}")).size(12));
                     }
                     col = col.push(text(format!("ID: {}", m.id)).size(11));
-                    col = col.push(button(text("▶ Lanjutkan")).on_press(Message::Resume(m.id.clone())));
+                    let actions: Element<'_, Message> = if self.confirm_delete.as_deref() == Some(m.id.as_str()) {
+                        row![
+                            text("Hapus file session ini? Tidak bisa dibatalkan.").size(12),
+                            button(text("Hapus permanen")).on_press(Message::DeleteConfirm(m.id.clone())).style(button::danger),
+                            button(text("Batal")).on_press(Message::DeleteCancel).style(button::secondary),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
+                        .into()
+                    } else {
+                        row![
+                            button(text("▶ Lanjutkan")).on_press(Message::Resume(m.id.clone())),
+                            button(text("Hapus")).on_press(Message::DeleteAsk(m.id.clone())).style(button::danger),
+                        ]
+                        .spacing(8)
+                        .into()
+                    };
+                    col = col.push(actions);
                     container(col).padding(24).into()
                 }
                 None => empty_state(),
@@ -670,6 +722,31 @@ mod tests {
         let (_dir, mut app) = fixture();
         let msgs = vec![Message::Tick, Message::NewTerminal, Message::Tick];
         assert!(found_after_frames(&mut app, msgs, "○ Fix webhook retry"));
+    }
+
+    #[test]
+    fn delete_session_removes_file_and_sidebar_row() {
+        let (dir, mut app) = fixture();
+        let file = dir.path().join("projects/-tmp-proj/s1.jsonl");
+        let msgs = vec![
+            Message::SelectSession("s1".into()),
+            Message::DeleteAsk("s1".into()),
+            Message::DeleteConfirm("s1".into()),
+        ];
+        assert!(!found_after_frames(&mut app, msgs, "○ Fix webhook retry"));
+        assert!(!file.exists());
+        assert!(app.index.get("s1").is_none());
+        assert_eq!(app.selected, Selected::None);
+    }
+
+    #[test]
+    fn delete_is_refused_while_session_runs_in_a_tab() {
+        let (dir, mut app) = fixture();
+        let _ = app.update(Message::NewTerminal);
+        app.tabs[0].session_id = Some("s1".into());
+        let _ = app.update(Message::DeleteConfirm("s1".into()));
+        assert!(dir.path().join("projects/-tmp-proj/s1.jsonl").exists());
+        assert!(app.error.is_some());
     }
 
     #[test]

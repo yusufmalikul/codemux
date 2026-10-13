@@ -140,6 +140,34 @@ pub fn parse_file(path: &Path) -> Option<SessionMeta> {
     Some(meta)
 }
 
+/// Delete a session file and its sub-folder (subagent transcripts).
+/// This is the only write the app ever does in the projects folder, and only
+/// when the user asks for it. Refuses anything that is not a top-level
+/// `<project>/<id>.jsonl` inside `projects_dir`.
+pub fn delete_session(projects_dir: &Path, path: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let refuse = |why: &str| Err(Error::new(ErrorKind::InvalidInput, why.to_string()));
+
+    let root = fs::canonicalize(projects_dir)?;
+    let file = fs::canonicalize(path)?;
+    if file.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return refuse("not a session file");
+    }
+    // Must be exactly <root>/<project>/<id>.jsonl
+    let project = file.parent().ok_or_else(|| Error::other("no parent"))?;
+    if project.parent() != Some(root.as_path()) {
+        return refuse("not inside the Claude projects folder");
+    }
+    let Some(stem) = file.file_stem() else { return refuse("no session id") };
+
+    fs::remove_file(&file)?;
+    let sub = project.join(stem);
+    if sub.is_dir() {
+        fs::remove_dir_all(sub)?;
+    }
+    Ok(())
+}
+
 /// Incremental index. Reads only lines added since the last scan.
 #[derive(Default)]
 pub struct Index {
@@ -317,6 +345,44 @@ not json at all
         writeln!(h, r#" retry","sessionId":"s1"}}"#).unwrap();
         assert!(idx.refresh(dir.path()));
         assert_eq!(idx.get("s1").unwrap().title(), "Fix webhook retry");
+    }
+
+    #[test]
+    fn delete_removes_file_and_subagent_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = write_fixture(dir.path(), FIXTURE);
+        let sub = dir.path().join("proj").join("s1").join("subagents");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("agent-x.jsonl"), "{}").unwrap();
+        let other = dir.path().join("proj").join("s2.jsonl");
+        fs::write(&other, FIXTURE).unwrap();
+
+        delete_session(dir.path(), &f).unwrap();
+
+        assert!(!f.exists());
+        assert!(!dir.path().join("proj").join("s1").exists());
+        assert!(other.exists(), "other sessions must stay");
+    }
+
+    #[test]
+    fn delete_refuses_paths_outside_projects_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let f = write_fixture(outside.path(), FIXTURE);
+        assert!(delete_session(root.path(), &f).is_err());
+        assert!(f.exists());
+
+        // Not a session file.
+        let txt = root.path().join("proj").join("notes.txt");
+        fs::create_dir_all(txt.parent().unwrap()).unwrap();
+        fs::write(&txt, "x").unwrap();
+        assert!(delete_session(root.path(), &txt).is_err());
+        assert!(txt.exists());
+
+        // Traversal out of the root.
+        let sneaky = root.path().join("proj").join("..").join("..").join(f.strip_prefix("/").unwrap());
+        assert!(delete_session(root.path(), &sneaky).is_err());
+        assert!(f.exists());
     }
 
     #[test]
