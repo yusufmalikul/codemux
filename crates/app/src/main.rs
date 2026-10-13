@@ -100,6 +100,8 @@ struct App {
     scale_factor: f32,
     /// Session waiting for "Delete permanently" confirmation.
     confirm_delete: Option<String>,
+    /// Workspace whose delete is waiting for a yes or no.
+    confirm_delete_workspace: Option<u64>,
     /// Privacy: the sidebar is collapsed (saved in state.json).
     hide_sidebar: bool,
     sidebar_width: f32,
@@ -159,6 +161,9 @@ enum Message {
     NewWorkspaceCancel,
     /// Collapse or expand a workspace. None is the default workspace.
     ToggleWorkspace(Option<u64>),
+    /// Ask before removing a workspace.
+    DeleteWorkspaceAsk(u64),
+    DeleteWorkspaceCancel,
     /// Remove a workspace. Its sessions go back to the default workspace.
     DeleteWorkspace(u64),
     /// Move a session to a workspace. None is the default workspace.
@@ -191,6 +196,7 @@ impl App {
             error: None,
             scale_factor: 1.0,
             confirm_delete: None,
+            confirm_delete_workspace: None,
             hide_sidebar: state.hide_sidebar,
             sidebar_width: state.sidebar_width.unwrap_or(SIDEBAR_DEFAULT).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             resizing: false,
@@ -460,7 +466,17 @@ impl App {
                     self.workspaces_changed();
                 }
             }
+            Message::DeleteWorkspaceAsk(id) => {
+                self.confirm_delete_workspace = Some(id);
+                // The tree is cached; a version bump makes it show the question.
+                self.workspaces_version += 1;
+            }
+            Message::DeleteWorkspaceCancel => {
+                self.confirm_delete_workspace = None;
+                self.workspaces_version += 1;
+            }
             Message::DeleteWorkspace(id) => {
+                self.confirm_delete_workspace = None;
                 self.workspaces.retain(|w| w.id != id);
                 self.workspaces_changed();
             }
@@ -719,6 +735,9 @@ impl App {
             items.sort_by_key(|m| std::cmp::Reverse(m.sort_time()));
             let open = searching || !ws.collapsed;
             list = list.push(workspace_header(Some(ws.id), &ws.name, items.len() + open_tabs.len(), open_tabs.len(), open));
+            if self.confirm_delete_workspace == Some(ws.id) {
+                list = list.push(indent(delete_workspace_confirm(ws.id, &ws.name)));
+            }
             if open {
                 for t in open_tabs {
                     list = list.push(indent(tab_row(t)));
@@ -904,11 +923,26 @@ fn workspace_header(id: Option<u64>, name: &str, count: usize, open_tabs: usize,
         .style(button::text);
     let mut line = row![toggle].spacing(4).align_y(iced::Alignment::Center);
     if let Some(id) = id {
-        line = line.push(button(text("✕").size(13)).padding([4, 10]).on_press(Message::DeleteWorkspace(id)).style(close_style));
+        line = line.push(button(text("✕").size(13)).padding([4, 10]).on_press(Message::DeleteWorkspaceAsk(id)).style(close_style));
     }
     container(line.padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 }))
         .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
         .into()
+}
+
+/// The yes/no question shown under a workspace before it is deleted.
+fn delete_workspace_confirm(id: u64, name: &str) -> Element<'static, Message> {
+    column![
+        text(format!("Delete \"{name}\"? Its sessions move to Default.")).size(13),
+        row![
+            button(text("Delete").size(13)).on_press(Message::DeleteWorkspace(id)).style(button::danger),
+            button(text("Cancel").size(13)).on_press(Message::DeleteWorkspaceCancel).style(button::secondary),
+        ]
+        .spacing(6),
+    ]
+    .spacing(6)
+    .padding(iced::Padding { top: 4.0, right: 14.0, bottom: 8.0, left: 0.0 })
+    .into()
 }
 
 /// What the sidebar shows for one open tab. Hashable, so the lazy tree
@@ -1207,6 +1241,27 @@ mod tests {
 
         assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], "▸ Fix webhook retry"), "not opened on select");
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"));
+    }
+
+    /// The ✕ on a workspace only asks first. Cancel keeps it; Delete removes it.
+    #[test]
+    fn delete_workspace_asks_for_confirmation() {
+        let (_dir, mut app) = fixture();
+        for m in [Message::NewWorkspaceStart, Message::NewWorkspaceName("Backend".into()), Message::NewWorkspaceCreate] {
+            let _ = app.update(m);
+        }
+        let msgs = vec![Message::DeleteWorkspaceAsk(1)];
+        assert!(found_after_frames(&mut app, msgs, "Delete \"Backend\"? Its sessions move to Default."), "no confirmation shown");
+        assert_eq!(app.workspaces.len(), 1, "deleted without confirmation");
+
+        let msgs = vec![Message::DeleteWorkspaceCancel];
+        assert!(!found_after_frames(&mut app, msgs, "Delete \"Backend\"? Its sessions move to Default."));
+        assert_eq!(app.workspaces.len(), 1);
+
+        let _ = app.update(Message::DeleteWorkspaceAsk(1));
+        let _ = app.update(Message::DeleteWorkspace(1));
+        assert!(app.workspaces.is_empty());
+        assert!(app.confirm_delete_workspace.is_none());
     }
 
     #[test]
