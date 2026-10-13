@@ -699,7 +699,10 @@ impl App {
             .spacing(6),
             workspace_bar,
             row![text(shortcut_hint).size(12).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(12)],
-            scrollable(list).height(Length::Fill),
+            // Keep a small gap between the rows (and their close buttons) and the scrollbar.
+            scrollable(list)
+                .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(6)))
+                .height(Length::Fill),
         ]
         .spacing(8)
         .into()
