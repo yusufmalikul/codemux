@@ -507,7 +507,7 @@ impl App {
                         .width(Length::Fill)
                         // Green marks a running tab; the selected one stays blue so it still stands out.
                         .style(if selected { button::primary } else { button::success }),
-                    button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(tab.id)).style(button::text),
+                    button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(tab.id)).style(close_style),
                 ]
                 // Keep the close button clear of the scrollbar on the right.
                 .spacing(4)
@@ -911,5 +911,14 @@ mod tests {
         // Restore the folder: the session comes back.
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
         assert!(found_after_frames(&mut app, vec![Message::Tick], "○ Fix webhook retry"));
+    }
+}
+
+/// Plain like a text button, but red while hovered or pressed, so it is clear
+/// that clicking closes the tab.
+fn close_style(theme: &iced::Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Hovered | button::Status::Pressed => button::danger(theme, status),
+        _ => button::text(theme, status),
     }
 }
