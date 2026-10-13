@@ -66,6 +66,7 @@ impl Terminal {
             )?,
             backend_event_rx: Arc::new(Mutex::new(backend_event_rx)),
         };
+        term.backend.set_theme(term.theme.clone());
         // Measure the font once. Doing it per event is costly (text shaping).
         term.sync_font();
         Ok(term)
@@ -95,6 +96,7 @@ impl Terminal {
         match cmd {
             Command::ChangeTheme(color_pallete) => {
                 self.theme = Theme::new(ThemeSettings::new(color_pallete));
+                self.backend.set_theme(self.theme.clone());
             },
             Command::ChangeFont(font_settings) => {
                 self.font = TermFont::new(font_settings);

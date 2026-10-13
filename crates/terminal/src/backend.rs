@@ -2,6 +2,7 @@
 // Copyright (c) Ilya Shvyryalkin. Modified for codemux. See NOTICE.
 use crate::actions::Action;
 use crate::settings::BackendSettings;
+use crate::theme::Theme;
 use alacritty_terminal::event::{
     Event, EventListener, Notify, OnResize, WindowSize,
 };
@@ -15,6 +16,7 @@ use alacritty_terminal::term::{
     self, cell::Cell, test::TermSize, viewport_to_point, Term, TermMode,
 };
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::{self, NamedColor, Rgb};
 use iced::keyboard::Modifiers;
 use iced_core::Size;
 use std::borrow::Cow;
@@ -143,6 +145,8 @@ pub struct Backend {
     child_pid: Option<u32>,
     /// URI of a hovered OSC 8 hyperlink (its shown text is not the URL).
     hovered_uri: Option<String>,
+    /// Colors used to answer color queries (OSC 4/10/11/12).
+    theme: Theme,
 }
 
 impl Backend {
@@ -199,7 +203,26 @@ impl Backend {
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
             child_pid,
             hovered_uri: None,
+            theme: Theme::default(),
         })
+    }
+
+    pub(crate) fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// Theme color for an alacritty color index: 0..=255 are the indexed
+    /// colors, the rest are named colors (foreground, background, ...).
+    fn default_color(&self, index: usize) -> Rgb {
+        let color = match u8::try_from(index) {
+            Ok(i) => ansi::Color::Indexed(i),
+            Err(_) if index == NamedColor::Background as usize => {
+                ansi::Color::Named(NamedColor::Background)
+            },
+            Err(_) => ansi::Color::Named(NamedColor::Foreground),
+        };
+        let [r, g, b, _] = self.theme.get_color(color).into_rgba8();
+        Rgb { r, g, b }
     }
 
     /// PID of the process started in the PTY (usually the shell).
@@ -225,6 +248,16 @@ impl Backend {
                     },
                     Event::PtyWrite(pty) => {
                         self.notifier.notify(pty.into_bytes())
+                    },
+                    // Programs such as Claude Code ask for these at startup
+                    // and wait for the answer, so they must always be answered.
+                    Event::ColorRequest(index, format) => {
+                        let rgb = term.colors()[index]
+                            .unwrap_or_else(|| self.default_color(index));
+                        self.notifier.notify(format(rgb).into_bytes())
+                    },
+                    Event::TextAreaSizeRequest(format) => {
+                        self.notifier.notify(format(self.size.into()).into_bytes())
                     },
                     _ => {},
                 };
@@ -775,6 +808,70 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Run `script`, feeding terminal events back like the app does, until
+    /// the first line contains `want` or 5 seconds pass. Returns the line.
+    fn run_until(script: &str, want: &str) -> String {
+        let (tx, mut rx) = mpsc::channel(100);
+        let settings = BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            ..Default::default()
+        };
+        let mut backend = Backend::new(0, tx, settings).unwrap();
+        backend.handle(Command::Resize(
+            Some(Size::new(800.0, 400.0)),
+            Some(Size::new(10.0, 20.0)),
+        ));
+        let start = Instant::now();
+        loop {
+            while let Ok(event) = rx.try_recv() {
+                backend.handle(Command::ProcessAlacrittyEvent(event));
+            }
+            let line: String = {
+                let term = backend.term.lock();
+                let grid = term.grid();
+                (0..grid.columns()).map(|c| grid[Line(0)][Column(c)].c).collect()
+            };
+            if line.contains(want) || start.elapsed() > Duration::from_secs(5) {
+                return line.trim_end().to_string();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Ask a question, wait up to 2s for the reply, print OK or NONE.
+    fn query_script(query: &str, reply_has: &str) -> String {
+        format!(
+            "stty -echo -icanon min 0 time 20; printf '{query}'; \
+             r=$(dd bs=64 count=1 2>/dev/null); \
+             case \"$r\" in *{reply_has}*) printf OK;; *) printf NONE;; esac; sleep 30"
+        )
+    }
+
+    /// Claude Code asks for the background color (OSC 11) at startup and
+    /// waits for the answer. With no answer, it hangs.
+    #[test]
+    fn answers_background_color_query() {
+        assert_eq!(run_until(&query_script("\\033]11;?\\007", "rgb:"), "OK"), "OK");
+    }
+
+    #[test]
+    fn answers_foreground_color_query() {
+        assert_eq!(run_until(&query_script("\\033]10;?\\007", "rgb:"), "OK"), "OK");
+    }
+
+    /// Text area size in pixels (CSI 14 t).
+    #[test]
+    fn answers_text_area_size_query() {
+        assert_eq!(run_until(&query_script("\\033[14t", "t"), "OK"), "OK");
+    }
+
+    /// Control: a query alacritty already answers by itself.
+    #[test]
+    fn answers_cursor_position_query() {
+        assert_eq!(run_until(&query_script("\\033[6n", "R"), "OK"), "OK");
     }
 
     fn start_printer(text: &str) -> Backend {
