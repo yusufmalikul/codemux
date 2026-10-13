@@ -53,9 +53,9 @@ fn set_dock_icon() {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TabKind {
-    /// "Session baru" or resume: the app started `claude` and knows the ID.
+    /// "New session" or resume: the app started `claude` and knows the ID.
     Claude,
-    /// "Terminal baru": a plain shell. Claude is detected when the user runs it.
+    /// "New terminal": a plain shell. Claude is detected when the user runs it.
     Shell,
 }
 
@@ -94,7 +94,7 @@ struct App {
     error: Option<String>,
     /// Window scale factor, passed to every terminal (trackpad scroll speed).
     scale_factor: f32,
-    /// Session waiting for "Hapus permanen" confirmation.
+    /// Session waiting for "Delete permanently" confirmation.
     confirm_delete: Option<String>,
     /// Privacy: hide all session rows in the sidebar (saved in state.json).
     hide_sessions: bool,
@@ -212,7 +212,7 @@ impl App {
                 focus
             }
             Err(e) => {
-                self.error = Some(format!("Gagal membuka terminal: {e}"));
+                self.error = Some(format!("Failed to open terminal: {e}"));
                 Task::none()
             }
         }
@@ -240,7 +240,7 @@ impl App {
             return Task::none();
         };
         if !cwd.is_dir() {
-            self.error = Some(format!("Folder sudah tidak ada: {}", cwd.display()));
+            self.error = Some(format!("Folder no longer exists: {}", cwd.display()));
             return Task::none();
         }
         match launch::claude(cwd, &ClaudeMode::Resume(sid.clone())) {
@@ -324,7 +324,7 @@ impl App {
             }
             Message::NewSession => {
                 return Task::perform(
-                    rfd::AsyncFileDialog::new().set_title("Pilih folder proyek").pick_folder(),
+                    rfd::AsyncFileDialog::new().set_title("Choose project folder").pick_folder(),
                     |f| Message::FolderPicked(f.map(|h| h.path().to_path_buf())),
                 );
             }
@@ -398,7 +398,7 @@ impl App {
     fn delete_session(&mut self, sid: &str) {
         self.confirm_delete = None;
         if self.tab_for_session(sid).is_some() {
-            self.error = Some("Session masih berjalan di tab. Tutup tab-nya dulu.".into());
+            self.error = Some("This session is still running in a tab. Close the tab first.".into());
             return;
         }
         let (Some(dir), Some(path)) = (self.projects_dir.clone(), self.index.get(sid).map(|m| m.path.clone())) else {
@@ -415,7 +415,7 @@ impl App {
                 self.refresh_index();
                 self.save_state();
             }
-            Err(e) => self.error = Some(format!("Gagal menghapus session: {e}")),
+            Err(e) => self.error = Some(format!("Failed to delete session: {e}")),
         }
     }
 
@@ -479,9 +479,9 @@ impl App {
         if !running_claude {
             ("▸", "shell")
         } else if tab.last_output.elapsed() < BUSY_WINDOW {
-            ("●", "bekerja")
+            ("●", "working")
         } else {
-            ("◐", "menunggu")
+            ("◐", "waiting")
         }
     }
 
@@ -490,7 +490,7 @@ impl App {
         let mut list = Column::new().spacing(2).width(Length::Fill);
 
         if !self.tabs.is_empty() {
-            list = list.push(section("AKTIF"));
+            list = list.push(section("ACTIVE"));
             for tab in &self.tabs {
                 let (title, folder) = self.tab_title(tab);
                 let (icon, status) = self.tab_status(tab);
@@ -517,24 +517,24 @@ impl App {
         let deps = (self.index_version, self.search.clone(), selected_session, self.previously_open.clone(), active, minute);
         list = list.push(lazy(deps, move |(_, _, _, _, active, _)| self.history_list(active)));
 
-        let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W tutup" } else { "Ctrl+Shift+N / T / W" };
+        let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W close" } else { "Ctrl+Shift+N / T / W" };
         let (hide_label, list): (_, Element<'_, Message>) = if self.hide_sessions {
-            ("Tampilkan", text("Sesi disembunyikan").size(12).into())
+            ("Show", text("Sessions hidden").size(12).into())
         } else {
-            ("Sembunyikan", scrollable(list).height(Length::Fill).into())
+            ("Hide", scrollable(list).height(Length::Fill).into())
         };
         column![
             row![
-                text_input("Cari session…", &self.search).on_input(Message::Search).size(13),
+                text_input("Search sessions…", &self.search).on_input(Message::Search).size(13),
                 button(text(hide_label).size(12)).on_press(Message::ToggleHideSessions).style(button::secondary),
             ]
             .spacing(6),
             row![
-                button(text("+ Session baru").size(13)).on_press(Message::NewSession).width(Length::Fill),
-                button(text(">_ Terminal baru").size(13)).on_press(Message::NewTerminal).width(Length::Fill),
+                button(text("+ New session").size(13)).on_press(Message::NewSession).width(Length::Fill),
+                button(text(">_ New terminal").size(13)).on_press(Message::NewTerminal).width(Length::Fill),
             ]
             .spacing(6),
-            row![text(shortcut_hint).size(10).width(Length::Fill), text(format!("Total {} sesi", self.index.count())).size(10)],
+            row![text(shortcut_hint).size(10).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(10)],
             list,
         ]
         .spacing(8)
@@ -561,7 +561,7 @@ impl App {
             .filter(|m| matches(m))
             .collect();
         if !prev.is_empty() {
-            list = list.push(section("TERBUKA SEBELUMNYA"));
+            list = list.push(section("PREVIOUSLY OPEN"));
             for m in prev {
                 list = list.push(self.session_row(m));
             }
@@ -613,7 +613,7 @@ impl App {
                     }
                     let header = row![
                         column![text(title).size(15), text(info.join(" · ")).size(11)].width(Length::Fill),
-                        button(text("■ Tutup").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger),
+                        button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger),
                     ]
                     .padding(8);
                     column![header, rule::horizontal(1), term::TerminalView::show(&tab.term).map(Message::Terminal)]
@@ -631,24 +631,24 @@ impl App {
                     if let Some(b) = &m.git_branch {
                         col = col.push(text(format!("Branch: {b}")).size(12));
                     }
-                    col = col.push(text(format!("Terakhir: {}", relative_time(m.sort_time()))).size(12));
+                    col = col.push(text(format!("Last active: {}", relative_time(m.sort_time()))).size(12));
                     if let Some(p) = &m.last_prompt {
-                        col = col.push(text(format!("Prompt terakhir: {p}")).size(12));
+                        col = col.push(text(format!("Last prompt: {p}")).size(12));
                     }
                     col = col.push(text(format!("ID: {}", m.id)).size(11));
                     let actions: Element<'_, Message> = if self.confirm_delete.as_deref() == Some(m.id.as_str()) {
                         row![
-                            text("Hapus file session ini? Tidak bisa dibatalkan.").size(12),
-                            button(text("Hapus permanen")).on_press(Message::DeleteConfirm(m.id.clone())).style(button::danger),
-                            button(text("Batal")).on_press(Message::DeleteCancel).style(button::secondary),
+                            text("Delete this session file? This cannot be undone.").size(12),
+                            button(text("Delete permanently")).on_press(Message::DeleteConfirm(m.id.clone())).style(button::danger),
+                            button(text("Cancel")).on_press(Message::DeleteCancel).style(button::secondary),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center)
                         .into()
                     } else {
                         row![
-                            button(text("▶ Lanjutkan")).on_press(Message::Resume(m.id.clone())),
-                            button(text("Hapus")).on_press(Message::DeleteAsk(m.id.clone())).style(button::danger),
+                            button(text("▶ Resume")).on_press(Message::Resume(m.id.clone())),
+                            button(text("Delete")).on_press(Message::DeleteAsk(m.id.clone())).style(button::danger),
                         ]
                         .spacing(8)
                         .into()
@@ -669,7 +669,7 @@ impl App {
 }
 
 fn empty_state<'a>() -> Element<'a, Message> {
-    container(text("Pilih session di kiri, atau buat Session baru / Terminal baru.").size(14))
+    container(text("Pick a session on the left, or start a New session / New terminal.").size(14))
         .center(Length::Fill)
         .into()
 }
@@ -686,11 +686,11 @@ fn time_group(t: DateTime<Utc>) -> &'static str {
     let today = Local::now().date_naive();
     let days = (today - t.with_timezone(&Local).date_naive()).num_days();
     match days {
-        ..=0 => "HARI INI",
-        1 => "KEMARIN",
-        2..=7 => "7 HARI TERAKHIR",
-        8..=30 => "30 HARI TERAKHIR",
-        _ => "LEBIH LAMA",
+        ..=0 => "TODAY",
+        1 => "YESTERDAY",
+        2..=7 => "LAST 7 DAYS",
+        8..=30 => "LAST 30 DAYS",
+        _ => "OLDER",
     }
 }
 
@@ -698,9 +698,9 @@ fn relative_time(t: DateTime<Utc>) -> String {
     let local = t.with_timezone(&Local);
     let mins = (Local::now() - local).num_minutes();
     match time_group(t) {
-        "HARI INI" if mins < 60 => format!("{}m", mins.max(0)),
-        "HARI INI" => local.format("%H:%M").to_string(),
-        "KEMARIN" => "kemarin".into(),
+        "TODAY" if mins < 60 => format!("{}m", mins.max(0)),
+        "TODAY" => local.format("%H:%M").to_string(),
+        "YESTERDAY" => "yesterday".into(),
         _ => local.format("%d %b").to_string(),
     }
 }
@@ -844,7 +844,7 @@ mod tests {
         let msgs = vec![Message::ToggleHideSessions];
         assert!(!found_after_frames(&mut app, msgs, "○ Fix webhook retry"), "history still visible");
         assert!(!found_after_frames(&mut app, vec![], "AKTIF"), "active tabs still visible");
-        assert!(found_after_frames(&mut app, vec![], "Sesi disembunyikan"));
+        assert!(found_after_frames(&mut app, vec![], "Sessions hidden"));
 
         let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
         assert!(!found_after_frames(&mut again, vec![], "○ Fix webhook retry"), "not remembered");
@@ -877,7 +877,7 @@ mod tests {
     fn sidebar_shows_history_sessions() {
         let (_dir, mut app) = fixture();
         assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"), "session not visible");
-        assert!(found_after_frames(&mut app, vec![], "HARI INI"), "time group not visible");
-        assert!(found_after_frames(&mut app, vec![], "Total 1 sesi"), "session count not visible");
+        assert!(found_after_frames(&mut app, vec![], "TODAY"), "time group not visible");
+        assert!(found_after_frames(&mut app, vec![], "Sessions: 1"), "session count not visible");
     }
 }

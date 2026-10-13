@@ -1,5 +1,5 @@
 //! Finds a `claude` process running inside a terminal tab, and the session
-//! file it writes to. Used by "Terminal baru" tabs, where the user starts
+//! file it writes to. Used by "New terminal" tabs, where the user starts
 //! `claude` by hand, so the app does not know the session ID in advance.
 
 use std::collections::{HashMap, HashSet, VecDeque};

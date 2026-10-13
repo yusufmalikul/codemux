@@ -34,7 +34,7 @@ impl SessionMeta {
             .clone()
             .or_else(|| self.ai_title.clone())
             .or_else(|| self.first_prompt.as_deref().map(truncate))
-            .unwrap_or_else(|| "(tanpa judul)".to_string())
+            .unwrap_or_else(|| "(untitled)".to_string())
     }
 
     pub fn folder_name(&self) -> String {
@@ -329,7 +329,7 @@ not json at all
         assert_eq!(m.title(), "AI");
         m.agent_name = Some("Named".into());
         assert_eq!(m.title(), "Named");
-        assert_eq!(SessionMeta::default().title(), "(tanpa judul)");
+        assert_eq!(SessionMeta::default().title(), "(untitled)");
     }
 
     #[test]
