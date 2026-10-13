@@ -451,7 +451,7 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if self.hide_sidebar {
-            let show = container(button(text("›").size(14)).on_press(Message::ToggleHideSidebar).style(button::text))
+            let show = container(button(text("›").size(16)).on_press(Message::ToggleHideSidebar).style(button::text))
                 .height(Length::Fill)
                 .padding(4);
             return row![show, rule::vertical(1), self.main_area()].into();
@@ -502,11 +502,11 @@ impl App {
                 let (icon, status) = self.tab_status(tab);
                 let selected = self.selected == Selected::Tab(tab.id);
                 let line = row![
-                    button(column![text(format!("{icon} {title}")).size(13), text(format!("   {folder} · {status}")).size(11)])
+                    button(column![text(format!("{icon} {title}")).size(15), text(format!("   {folder} · {status}")).size(13)])
                         .on_press(Message::SelectTab(tab.id))
                         .width(Length::Fill)
                         .style(if selected { button::primary } else { button::text }),
-                    button(text("✕").size(11)).on_press(Message::CloseTab(tab.id)).style(button::text),
+                    button(text("✕").size(13)).on_press(Message::CloseTab(tab.id)).style(button::text),
                 ];
                 list = list.push(line);
             }
@@ -526,16 +526,16 @@ impl App {
         let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W close · ⌘B hide" } else { "Ctrl+Shift+N / T / W / B" };
         column![
             row![
-                text_input("Search sessions…", &self.search).on_input(Message::Search).size(13),
-                button(text("‹ Hide").size(12)).on_press(Message::ToggleHideSidebar).style(button::secondary),
+                text_input("Search sessions…", &self.search).on_input(Message::Search).size(15),
+                button(text("‹ Hide").size(14)).on_press(Message::ToggleHideSidebar).style(button::secondary),
             ]
             .spacing(6),
             row![
-                button(text("+ New session").size(13)).on_press(Message::NewSession).width(Length::Fill),
-                button(text(">_ New terminal").size(13)).on_press(Message::NewTerminal).width(Length::Fill),
+                button(text("+ New session").size(15)).on_press(Message::NewSession).width(Length::Fill),
+                button(text(">_ New terminal").size(15)).on_press(Message::NewTerminal).width(Length::Fill),
             ]
             .spacing(6),
-            row![text(shortcut_hint).size(10).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(10)],
+            row![text(shortcut_hint).size(12).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(12)],
             scrollable(list).height(Length::Fill),
         ]
         .spacing(8)
@@ -595,7 +595,7 @@ impl App {
             sub.push(b.clone());
         }
         sub.push(relative_time(m.sort_time()));
-        button(column![text(format!("○ {}", m.title())).size(13), text(format!("   {}", sub.join(" · "))).size(11)])
+        button(column![text(format!("○ {}", m.title())).size(15), text(format!("   {}", sub.join(" · "))).size(13)])
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -682,7 +682,7 @@ fn section(label: &'static str) -> Element<'static, Message> {
     // Bold, larger, and with space above so each group stands apart from the
     // rows of the group before it.
     let bold = iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT };
-    container(text(label).size(12).font(bold)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
+    container(text(label).size(14).font(bold)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
 }
 
 fn folder_label(p: &std::path::Path) -> String {
