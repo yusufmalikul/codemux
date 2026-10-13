@@ -97,8 +97,10 @@ impl Default for TerminalSize {
             cell_height: 1,
             num_cols: 80,
             num_lines: 50,
-            layout_width: 80.0,
-            layout_height: 50.0,
+            // Unknown until the first layout. Zero makes `resize` wait for it,
+            // so measuring the font alone does not shrink the PTY.
+            layout_width: 0.0,
+            layout_height: 0.0,
         }
     }
 }
@@ -839,6 +841,37 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The font is measured before the first layout. That must not shrink the
+    /// PTY to "80 px / cell width" columns: the shell would print its first
+    /// prompt about 10 columns wide and break it ("mai" / "n)").
+    #[test]
+    fn font_before_layout_keeps_default_size() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let settings = BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 0.3; stty size; sleep 30".into()],
+            ..Default::default()
+        };
+        let mut backend = Backend::new(0, tx, settings).unwrap();
+        backend.handle(Command::Resize(None, Some(Size::new(8.0, 16.0))));
+        let start = Instant::now();
+        let line = loop {
+            while let Ok(event) = rx.try_recv() {
+                backend.handle(Command::ProcessAlacrittyEvent(event));
+            }
+            let line: String = {
+                let term = backend.term.lock();
+                let grid = term.grid();
+                (0..grid.columns()).map(|c| grid[Line(0)][Column(c)].c).collect()
+            };
+            if !line.trim().is_empty() || start.elapsed() > Duration::from_secs(3) {
+                break line.trim().to_string();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(line, "50 80");
     }
 
     /// Ask a question, wait up to 2s for the reply, print OK or NONE.
