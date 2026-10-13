@@ -680,6 +680,12 @@ impl App {
         // While searching, open every workspace so no match is hidden.
         let searching = !q.is_empty();
 
+        // Sessions open in a tab show under ACTIVE, not in their workspace,
+        // but they still count toward it.
+        let active_count = |ids: &mut dyn Iterator<Item = &str>| {
+            ids.filter(|s| active.contains(s)).filter_map(|s| self.index.listed(s)).filter(|m| matches(m)).count()
+        };
+
         for ws in &self.workspaces {
             let mut items: Vec<&SessionMeta> = ws
                 .sessions
@@ -693,7 +699,8 @@ impl App {
             }
             items.sort_by_key(|m| std::cmp::Reverse(m.sort_time()));
             let open = searching || !ws.collapsed;
-            list = list.push(workspace_header(Some(ws.id), &ws.name, items.len(), open));
+            let count = items.len() + active_count(&mut ws.sessions.iter().map(String::as_str));
+            list = list.push(workspace_header(Some(ws.id), &ws.name, count, open));
             if open {
                 for m in items {
                     list = list.push(indent(self.session_row(m)));
@@ -722,7 +729,8 @@ impl App {
             .take(HISTORY_LIMIT)
             .collect();
         let open = searching || !self.default_collapsed;
-        list = list.push(workspace_header(None, DEFAULT_WORKSPACE, prev.len() + rest.len(), open));
+        let active_default = active_count(&mut active.iter().copied().filter(|s| !in_workspace.contains(s)));
+        list = list.push(workspace_header(None, DEFAULT_WORKSPACE, prev.len() + rest.len() + active_default, open));
         if !open {
             return list.into();
         }
