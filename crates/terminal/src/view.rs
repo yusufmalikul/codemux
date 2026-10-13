@@ -79,8 +79,7 @@ impl<'a> TerminalView<'a> {
         shell: &mut iced_graphics::core::Shell<'_, Event>,
     ) {
         let layout_size = layout.bounds().size();
-        if state.size != layout_size {
-            state.size = layout_size;
+        if state.needs_resize(self.term.id, layout_size) {
             let cmd = Command::Resize(
                 Some(layout_size),
                 Some(self.term.font.measure),
@@ -732,6 +731,10 @@ struct TerminalViewState {
     scroll_pixels: f32,
     keyboard_modifiers: Modifiers,
     size: Size<f32>,
+    /// Terminal the size was sent to. iced keeps this state when another
+    /// terminal takes the same place in the tree (switching tabs), and that
+    /// terminal still needs its own size.
+    sized_term: Option<u64>,
     mouse_position_on_grid: TerminalGridPoint,
 }
 
@@ -744,8 +747,19 @@ impl TerminalViewState {
             scroll_pixels: 0.0,
             keyboard_modifiers: Modifiers::empty(),
             size: Size::from([0.0, 0.0]),
+            sized_term: None,
             mouse_position_on_grid: TerminalGridPoint::default(),
         }
+    }
+
+    /// True when terminal `id` has not been told about `size` yet.
+    fn needs_resize(&mut self, id: u64, size: Size<f32>) -> bool {
+        if self.size == size && self.sized_term == Some(id) {
+            return false;
+        }
+        self.size = size;
+        self.sized_term = Some(id);
+        true
     }
 }
 
@@ -842,6 +856,19 @@ impl BackgroundRect {
 
 #[cfg(test)]
 mod tests {
+    /// A new tab reuses the widget state of the old one. It must still get
+    /// its size, or its PTY keeps the default 50 lines and the bottom rows
+    /// are drawn off screen.
+    #[test]
+    fn switching_terminal_with_same_size_still_resizes() {
+        let mut state = super::TerminalViewState::new();
+        let size = iced::Size::new(800.0, 400.0);
+        assert!(state.needs_resize(1, size));
+        assert!(!state.needs_resize(1, size));
+        assert!(state.needs_resize(2, size));
+        assert!(!state.needs_resize(2, size));
+    }
+
     /// Copy must not wipe the clipboard when there is no selection.
     /// With Claude Code, the mouse goes to Claude, which copies by itself
     /// (OSC 52). An empty ⌘C used to overwrite that with "".
