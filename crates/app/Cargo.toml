@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+# Capital C: macOS shows the binary name in the Dock and menu bar.
+[[bin]]
+name = "Codemux"
+path = "src/main.rs"
+
 [dependencies]
 codemux-core = { path = "../core" }
 codemux-terminal = { path = "../terminal" }

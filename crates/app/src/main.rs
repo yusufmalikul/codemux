@@ -1,4 +1,4 @@
-//! codemux: a session manager for Claude Code.
+//! Codemux: a session manager for Claude Code.
 //! Sidebar of sessions on the left, a live terminal on the right.
 
 use chrono::{DateTime, Local, Utc};
@@ -8,7 +8,7 @@ use codemux_core::paths;
 use codemux_core::sessions::{Index, SessionMeta};
 use codemux_core::store::AppState;
 use codemux_terminal as term;
-use iced::widget::{button, column, container, lazy, row, rule, scrollable, text, text_input, Column};
+use iced::widget::{button, column, container, lazy, mouse_area, row, rule, scrollable, text, text_input, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -18,13 +18,19 @@ const TICK: Duration = Duration::from_millis(1500);
 /// Output in the last 2 seconds means Claude is working (spec 7, fallback).
 const BUSY_WINDOW: Duration = Duration::from_secs(2);
 const HISTORY_LIMIT: usize = 300;
+const SIDEBAR_DEFAULT: f32 = 300.0;
+const SIDEBAR_MIN: f32 = 180.0;
+const SIDEBAR_MAX: f32 = 700.0;
+/// Main color for buttons and the selected row.
+const ACCENT: iced::Color = iced::Color::from_rgb8(0x35, 0x3d, 0xb0);
 
 fn main() -> iced::Result {
     launch::clean_inherited_env();
     iced::application(App::new, App::update, App::view)
-        .title("codemux")
+        .title("Codemux")
         .window_size((1280.0, 800.0))
         .subscription(App::subscription)
+        .theme(App::theme)
         .run()
 }
 
@@ -92,6 +98,9 @@ struct App {
     confirm_delete: Option<String>,
     /// Privacy: hide all session rows in the sidebar (saved in state.json).
     hide_sessions: bool,
+    sidebar_width: f32,
+    /// True while the user drags the sidebar divider.
+    resizing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +108,10 @@ enum Message {
     Terminal(term::Event),
     Tick,
     ToggleHideSessions,
+    ResizeStart,
+    /// Cursor x while dragging the divider.
+    ResizeTo(f32),
+    ResizeEnd,
     /// The window is up; macOS resets the Dock icon during launch, so set it now.
     WindowOpened,
     NewSession,
@@ -144,6 +157,8 @@ impl App {
             scale_factor: 1.0,
             confirm_delete: None,
             hide_sessions: state.hide_sessions,
+            sidebar_width: state.sidebar_width.unwrap_or(SIDEBAR_DEFAULT).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            resizing: false,
         };
         app.refresh_index();
         app
@@ -160,7 +175,10 @@ impl App {
     fn save_state(&self) {
         let Some(path) = &self.state_path else { return };
         let open_sessions = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
-        let _ = AppState { version: 0, open_sessions, hide_sessions: self.hide_sessions }.save(path);
+        let _ = AppState { version: 0, open_sessions, hide_sessions: self.hide_sessions,
+            sidebar_width: Some(self.sidebar_width),
+        }
+        .save(path);
     }
 
     fn spawn(&mut self, kind: TabKind, spec: LaunchSpec, session_id: Option<String>) -> Task<Message> {
@@ -350,6 +368,13 @@ impl App {
                 self.hide_sessions = !self.hide_sessions;
                 self.save_state();
             }
+            Message::ResizeStart => self.resizing = true,
+            Message::ResizeTo(x) if self.resizing => self.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            Message::ResizeTo(_) => {}
+            Message::ResizeEnd => {
+                self.resizing = false;
+                self.save_state();
+            }
             Message::DeleteAsk(sid) => self.confirm_delete = Some(sid),
             Message::DeleteCancel => self.confirm_delete = None,
             Message::DeleteConfirm(sid) => self.delete_session(&sid),
@@ -415,15 +440,27 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         let terms = self.tabs.iter().map(|t| t.term.subscription().map(Message::Terminal));
         Subscription::batch(
-            terms.chain([time::every(TICK).map(|_| Message::Tick), iced::event::listen_with(shortcut)]),
+            terms.chain([time::every(TICK).map(|_| Message::Tick), iced::event::listen_with(shortcut)]).chain(
+                // Follow the mouse only while dragging the divider.
+                self.resizing.then(|| iced::event::listen_with(resize_event)),
+            ),
         )
     }
 
     // ---------- view ----------
 
     fn view(&self) -> Element<'_, Message> {
-        let sidebar = container(self.sidebar()).width(300).height(Length::Fill).padding(8);
-        row![sidebar, rule::vertical(1), self.main_area()].into()
+        let sidebar = container(self.sidebar()).width(self.sidebar_width).height(Length::Fill).padding(8);
+        // A wider grab area than the 1px line, so the divider is easy to hit.
+        let divider = mouse_area(container(rule::vertical(1)).width(5).center_x(5))
+            .on_press(Message::ResizeStart)
+            .interaction(iced::mouse::Interaction::ResizingHorizontally);
+        row![sidebar, divider, self.main_area()].into()
+    }
+
+    fn theme(&self) -> iced::Theme {
+        let palette = iced::theme::Palette { primary: ACCENT, ..iced::theme::Palette::DARK };
+        iced::Theme::custom("codemux", palette)
     }
 
     fn tab_title(&self, tab: &Tab) -> (String, String) {
@@ -497,7 +534,7 @@ impl App {
                 button(text(">_ Terminal baru").size(13)).on_press(Message::NewTerminal).width(Length::Fill),
             ]
             .spacing(6),
-            text(shortcut_hint).size(10),
+            row![text(shortcut_hint).size(10).width(Length::Fill), text(format!("Total {} sesi", self.index.count())).size(10)],
             list,
         ]
         .spacing(8)
@@ -668,6 +705,14 @@ fn relative_time(t: DateTime<Utc>) -> String {
     }
 }
 
+fn resize_event(event: iced::Event, _status: iced::event::Status, _window: iced::window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::ResizeTo(position.x)),
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => Some(Message::ResizeEnd),
+        _ => None,
+    }
+}
+
 /// App shortcuts. macOS uses ⌘, which the terminal does not need.
 /// Windows/Linux use Ctrl+Shift, so plain Ctrl keys stay with the terminal (spec 6.3).
 fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::window::Id) -> Option<Message> {
@@ -806,10 +851,33 @@ mod tests {
         assert!(found_after_frames(&mut again, vec![Message::ToggleHideSessions], "○ Fix webhook retry"));
     }
 
+    /// Dragging the divider sets the sidebar width, within limits, and it is remembered.
+    #[test]
+    fn sidebar_resize_is_clamped_and_remembered() {
+        let (dir, mut app) = fixture();
+        for m in [Message::ResizeStart, Message::ResizeTo(420.0), Message::ResizeEnd] {
+            let _ = app.update(m);
+        }
+        assert_eq!(app.sidebar_width, 420.0);
+        let _ = app.update(Message::ResizeTo(900.0));
+        assert_eq!(app.sidebar_width, 420.0, "moves after release must be ignored");
+        for m in [Message::ResizeStart, Message::ResizeTo(10.0), Message::ResizeEnd] {
+            let _ = app.update(m);
+        }
+        assert_eq!(app.sidebar_width, SIDEBAR_MIN);
+        for m in [Message::ResizeStart, Message::ResizeTo(450.0), Message::ResizeEnd] {
+            let _ = app.update(m);
+        }
+        let again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        assert_eq!(again.sidebar_width, 450.0);
+        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+    }
+
     #[test]
     fn sidebar_shows_history_sessions() {
         let (_dir, mut app) = fixture();
         assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"), "session not visible");
         assert!(found_after_frames(&mut app, vec![], "HARI INI"), "time group not visible");
+        assert!(found_after_frames(&mut app, vec![], "Total 1 sesi"), "session count not visible");
     }
 }

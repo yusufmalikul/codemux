@@ -260,6 +260,11 @@ impl Index {
         self.by_id.get(id).and_then(|p| self.entries.get(p)).map(|e| &e.meta)
     }
 
+    /// Number of sessions that `sessions()` returns.
+    pub fn count(&self) -> usize {
+        self.entries.values().filter(|e| e.meta.cwd.is_some()).count()
+    }
+
     /// Sessions with at least one real message, newest first.
     pub fn sessions(&self) -> Vec<&SessionMeta> {
         let mut list: Vec<_> = self
