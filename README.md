@@ -4,6 +4,8 @@
 
 A desktop session manager for Claude Code.
 
+![Codemux showing sessions grouped into workspaces in the sidebar, with Claude Code running in a tab](docs/screenshot.png)
+
 One window: a sidebar with all your Claude Code sessions on the left, and the session's terminal on the right.
 
 ## Why
