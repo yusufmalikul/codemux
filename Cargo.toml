@@ -12,3 +12,7 @@ iced = { version = "=0.14.0", features = ["canvas", "lazy", "advanced", "tokio"]
 iced_core = "=0.14.0"
 iced_graphics = { version = "=0.14.0", default-features = false }
 alacritty_terminal = "0.26.0"
+
+# Fast debug builds for `cargo watch`: optimize dependencies, keep our own crates quick to rebuild.
+[profile.dev.package."*"]
+opt-level = 3
