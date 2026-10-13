@@ -505,7 +505,8 @@ impl App {
                     button(column![text(format!("{icon} {title}")).size(15), text(format!("   {folder} · {status}")).size(13)])
                         .on_press(Message::SelectTab(tab.id))
                         .width(Length::Fill)
-                        .style(if selected { button::primary } else { button::text }),
+                        // Green marks a running tab; the selected one stays blue so it still stands out.
+                        .style(if selected { button::primary } else { button::success }),
                     button(text("✕").size(13)).on_press(Message::CloseTab(tab.id)).style(button::text),
                 ];
                 list = list.push(line);
