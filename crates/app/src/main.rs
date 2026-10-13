@@ -28,6 +28,23 @@ fn main() -> iced::Result {
         .run()
 }
 
+/// The app runs as a plain binary, not a `.app` bundle, so macOS has no icon
+/// file to read. Set the Dock icon at runtime instead.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(include_bytes!("../assets/icon.png"));
+    if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_icon() {}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TabKind {
     /// "Session baru" or resume: the app started `claude` and knows the ID.
@@ -79,6 +96,8 @@ struct App {
 enum Message {
     Terminal(term::Event),
     Tick,
+    /// The window is up; macOS resets the Dock icon during launch, so set it now.
+    WindowOpened,
     NewSession,
     FolderPicked(Option<PathBuf>),
     NewTerminal,
@@ -267,6 +286,9 @@ impl App {
                 if let term::actions::Action::Shutdown = self.tabs[pos].term.handle(term::Command::ProxyToBackend(cmd)) {
                     return self.close_tab(id);
                 }
+            }
+            Message::WindowOpened => {
+                set_dock_icon();
             }
             Message::Tick => {
                 self.refresh_index();
@@ -631,8 +653,10 @@ fn relative_time(t: DateTime<Utc>) -> String {
 /// App shortcuts. macOS uses ⌘, which the terminal does not need.
 /// Windows/Linux use Ctrl+Shift, so plain Ctrl keys stay with the terminal (spec 6.3).
 fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::window::Id) -> Option<Message> {
-    if let iced::Event::Window(iced::window::Event::Rescaled(scale)) = event {
-        return Some(Message::ScaleFactor(scale));
+    match event {
+        iced::Event::Window(iced::window::Event::Rescaled(scale)) => return Some(Message::ScaleFactor(scale)),
+        iced::Event::Window(iced::window::Event::Opened { .. }) => return Some(Message::WindowOpened),
+        _ => {}
     }
     let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else { return None };
     let app_mod = if cfg!(target_os = "macos") {
