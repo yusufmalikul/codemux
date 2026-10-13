@@ -558,7 +558,7 @@ impl App {
             .previously_open
             .iter()
             .filter(|s| !active.contains(s.as_str()))
-            .filter_map(|s| self.index.get(s))
+            .filter_map(|s| self.index.listed(s))
             .filter(|m| matches(m))
             .collect();
         if !prev.is_empty() {
@@ -760,11 +760,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let proj = dir.path().join("projects").join("-tmp-proj");
         std::fs::create_dir_all(&proj).unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let cwd = work.display();
         let now = Utc::now().to_rfc3339();
         std::fs::write(
             proj.join("s1.jsonl"),
             format!(
-                "{{\"type\":\"user\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"hello\"}}}}\n\
+                "{{\"type\":\"user\",\"sessionId\":\"s1\",\"cwd\":\"{cwd}\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"hello\"}}}}\n\
                  {{\"type\":\"ai-title\",\"aiTitle\":\"Fix webhook retry\",\"sessionId\":\"s1\"}}\n"
             ),
         )
@@ -888,5 +891,20 @@ mod tests {
         assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"), "session not visible");
         assert!(found_after_frames(&mut app, vec![], "TODAY"), "time group not visible");
         assert!(found_after_frames(&mut app, vec![], "Sessions: 1"), "session count not visible");
+    }
+
+    /// A session whose folder was deleted cannot be resumed, so it must
+    /// leave the sidebar (and the count), even though its file still exists.
+    #[test]
+    fn session_disappears_when_its_folder_is_deleted() {
+        let (dir, mut app) = fixture();
+        assert!(found_after_frames(&mut app, vec![], "○ Fix webhook retry"));
+        std::fs::remove_dir_all(dir.path().join("work")).unwrap();
+        assert!(!found_after_frames(&mut app, vec![Message::Tick], "○ Fix webhook retry"), "row still shown");
+        assert!(found_after_frames(&mut app, vec![], "Sessions: 0"), "count not updated");
+
+        // Restore the folder: the session comes back.
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        assert!(found_after_frames(&mut app, vec![Message::Tick], "○ Fix webhook retry"));
     }
 }

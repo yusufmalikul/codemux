@@ -178,6 +178,15 @@ pub struct Index {
 struct Entry {
     offset: u64,
     meta: SessionMeta,
+    /// The session's folder still exists. A session whose folder was deleted
+    /// cannot be resumed, so it is not listed.
+    cwd_exists: bool,
+}
+
+impl Entry {
+    fn listed(&self) -> bool {
+        self.meta.cwd.is_some() && self.cwd_exists
+    }
 }
 
 impl Index {
@@ -207,6 +216,20 @@ impl Index {
         if before != self.entries.len() {
             self.by_id.retain(|_, p| seen.contains(p));
         }
+
+        // Folders can be deleted at any time, so check them on every scan.
+        // Many sessions share a folder: check each folder once.
+        let mut dirs: HashMap<PathBuf, bool> = HashMap::new();
+        for entry in self.entries.values_mut() {
+            let exists = match &entry.meta.cwd {
+                Some(cwd) => *dirs.entry(cwd.clone()).or_insert_with(|| cwd.is_dir()),
+                None => false,
+            };
+            if exists != entry.cwd_exists {
+                entry.cwd_exists = exists;
+                changed = true;
+            }
+        }
         changed || before != self.entries.len()
     }
 
@@ -222,6 +245,7 @@ impl Index {
         }
         let entry = self.entries.entry(path.to_path_buf()).or_insert_with(|| Entry {
             offset: 0,
+            cwd_exists: false,
             meta: SessionMeta {
                 id: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
                 path: path.to_path_buf(),
@@ -260,19 +284,20 @@ impl Index {
         self.by_id.get(id).and_then(|p| self.entries.get(p)).map(|e| &e.meta)
     }
 
-    /// Number of sessions that `sessions()` returns.
-    pub fn count(&self) -> usize {
-        self.entries.values().filter(|e| e.meta.cwd.is_some()).count()
+    /// Like `get`, but only for a session that `sessions()` lists.
+    pub fn listed(&self, id: &str) -> Option<&SessionMeta> {
+        self.by_id.get(id).and_then(|p| self.entries.get(p)).filter(|e| e.listed()).map(|e| &e.meta)
     }
 
-    /// Sessions with at least one real message, newest first.
+    /// Number of sessions that `sessions()` returns.
+    pub fn count(&self) -> usize {
+        self.entries.values().filter(|e| e.listed()).count()
+    }
+
+    /// Sessions with at least one real message whose folder still exists,
+    /// newest first.
     pub fn sessions(&self) -> Vec<&SessionMeta> {
-        let mut list: Vec<_> = self
-            .entries
-            .values()
-            .map(|e| &e.meta)
-            .filter(|m| m.cwd.is_some())
-            .collect();
+        let mut list: Vec<_> = self.entries.values().filter(|e| e.listed()).map(|e| &e.meta).collect();
         list.sort_by(|a, b| b.sort_time().cmp(&a.sort_time()));
         list
     }
@@ -393,10 +418,13 @@ not json at all
     #[test]
     fn index_ignores_subagent_folders() {
         let dir = tempfile::tempdir().unwrap();
-        write_fixture(dir.path(), FIXTURE);
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        let body = FIXTURE.replace("/tmp/proj", &work.display().to_string());
+        write_fixture(dir.path(), &body);
         let sub = dir.path().join("proj").join("s1").join("subagents");
         fs::create_dir_all(&sub).unwrap();
-        fs::write(sub.join("agent-x.jsonl"), FIXTURE).unwrap();
+        fs::write(sub.join("agent-x.jsonl"), &body).unwrap();
         let mut idx = Index::default();
         idx.refresh(dir.path());
         assert_eq!(idx.sessions().len(), 1);
