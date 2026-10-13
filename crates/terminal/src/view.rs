@@ -102,6 +102,42 @@ impl<'a> TerminalView<'a> {
         }
     }
 
+    /// Ends a drag whose button was released outside the terminal (for
+    /// example over the sidebar). Mouse events outside the terminal are not
+    /// routed to it, so without this the drag stays on, and the next time
+    /// the cursor moves over the terminal it stretches an old selection.
+    fn end_drag_outside(
+        state: &mut TerminalViewState,
+        terminal_mode: &TermMode,
+        event: &iced_core::Event,
+        is_cursor_in_layout: bool,
+        commands: &mut Vec<Command>,
+    ) {
+        use iced::Event::Mouse;
+        use iced_core::mouse::Button::Left;
+        use iced_core::mouse::Event::{ButtonPressed, ButtonReleased};
+
+        if is_cursor_in_layout || !state.is_dragged {
+            return;
+        }
+
+        match event {
+            Mouse(ButtonReleased(Left)) => {
+                state.is_dragged = false;
+                if terminal_mode.intersects(TermMode::MOUSE_MODE) {
+                    commands.push(Command::MouseReport(
+                        MouseButton::LeftButton,
+                        state.keyboard_modifiers,
+                        state.mouse_position_on_grid,
+                        false,
+                    ));
+                }
+            },
+            Mouse(ButtonPressed(_)) => state.is_dragged = false,
+            _ => {},
+        }
+    }
+
     fn handle_mouse_event(
         &self,
         state: &mut TerminalViewState,
@@ -662,7 +698,17 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         let is_cursor_in_layout = self.is_cursor_in_layout(cursor, layout);
         self.handle_focus(event, state, is_cursor_in_layout);
 
+        let mut drag_end = Vec::new();
+        Self::end_drag_outside(
+            state,
+            &self.term.backend.renderable_content().terminal_mode,
+            event,
+            is_cursor_in_layout,
+            &mut drag_end,
+        );
+
         let commands = match event {
+            iced::Event::Mouse(_) if !drag_end.is_empty() => drag_end,
             iced::Event::Mouse(mouse_event) if is_cursor_in_layout => self
                 .handle_mouse_event(
                     state,
@@ -1057,6 +1103,38 @@ mod tests {
 
                 assert_eq!(state.mouse_position_on_grid, expected);
             }
+        }
+
+        #[test]
+        fn release_outside_terminal_ends_drag() {
+            let mut state = TerminalViewState::new();
+            state.is_dragged = true;
+            let release = iced::Event::Mouse(
+                iced_core::mouse::Event::ButtonReleased(
+                    iced_core::mouse::Button::Left,
+                ),
+            );
+            let mut commands = Vec::new();
+
+            TerminalView::end_drag_outside(
+                &mut state,
+                &TermMode::empty(),
+                &release,
+                false,
+                &mut commands,
+            );
+            assert!(!state.is_dragged);
+            assert!(commands.is_empty());
+
+            // Moving back over the terminal must not stretch a selection.
+            TerminalView::handle_cursor_moved(
+                &mut state,
+                &RenderableContent::default(),
+                &Point { x: 100.0, y: 150.0 },
+                Point { x: 5.0, y: 5.0 },
+                &mut commands,
+            );
+            assert!(commands.is_empty());
         }
 
         #[test]
