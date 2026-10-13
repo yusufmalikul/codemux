@@ -925,7 +925,7 @@ fn workspace_header(id: Option<u64>, name: &str, count: usize, open_tabs: usize,
     if let Some(id) = id {
         line = line.push(button(text("✕").size(13)).padding([4, 10]).on_press(Message::DeleteWorkspaceAsk(id)).style(close_style));
     }
-    container(line.padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 }))
+    container(line)
         .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
         .into()
 }
@@ -941,7 +941,7 @@ fn delete_workspace_confirm(id: u64, name: &str) -> Element<'static, Message> {
         .spacing(6),
     ]
     .spacing(6)
-    .padding(iced::Padding { top: 4.0, right: 14.0, bottom: 8.0, left: 0.0 })
+    .padding(iced::Padding { top: 4.0, right: 0.0, bottom: 8.0, left: 0.0 })
     .into()
 }
 
@@ -967,9 +967,7 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
             .style(if t.selected { button::primary } else { button::success }),
         button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(t.id)).style(close_style),
     ]
-    // Keep the close button clear of the scrollbar on the right.
     .spacing(4)
-    .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 })
     .align_y(iced::Alignment::Center)
     .into()
 }
