@@ -1,0 +1,20 @@
+[package]
+name = "codemux-core"
+description = "Session index and launch logic for codemux (no UI)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "codemux_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+directories = "6"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

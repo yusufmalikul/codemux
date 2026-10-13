@@ -1,0 +1,21 @@
+[package]
+name = "codemux-terminal"
+description = "Terminal widget for Iced, based on iced_term 0.8 (MIT)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "codemux_terminal"
+
+[dependencies]
+alacritty_terminal.workspace = true
+iced.workspace = true
+iced_core.workspace = true
+iced_graphics.workspace = true
+anyhow = "1"
+open = "5"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,17 @@
+[package]
+name = "codemux"
+description = "Session manager for Claude Code"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+codemux-core = { path = "../core" }
+codemux-terminal = { path = "../terminal" }
+iced.workspace = true
+rfd = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+iced_test = "=0.14.0"
+tempfile = "3"
