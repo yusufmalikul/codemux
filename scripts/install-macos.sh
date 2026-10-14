@@ -24,6 +24,9 @@ done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/Codemux.icns"
 rm -rf "$iconset"
 
+# The standard About panel (Codemux > About Codemux) shows this file under the version.
+cp crates/app/assets/Credits.html "$app/Contents/Resources/Credits.html"
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,6 +42,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSHumanReadableCopyright</key><string>MIT License</string>
 </dict>
 </plist>
 PLIST
