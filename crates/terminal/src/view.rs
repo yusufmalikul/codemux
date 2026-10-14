@@ -232,6 +232,8 @@ impl<'a> TerminalView<'a> {
                 mouse::click::Kind::Double => SelectionType::Semantic,
                 mouse::click::Kind::Triple => SelectionType::Lines,
             };
+            state.click_point = (selection_type == SelectionType::Simple)
+                .then_some(state.mouse_position_on_grid);
             state.last_click = Some(current_click);
             Command::SelectStart(
                 selection_type,
@@ -293,6 +295,7 @@ impl<'a> TerminalView<'a> {
         commands: &mut Vec<Command>,
     ) {
         state.is_dragged = false;
+        let click_point = state.click_point.take();
 
         if terminal_mode.intersects(TermMode::MOUSE_MODE) {
             commands.push(Command::MouseReport(
@@ -301,6 +304,10 @@ impl<'a> TerminalView<'a> {
                 state.mouse_position_on_grid,
                 false,
             ));
+        } else if click_point == Some(state.mouse_position_on_grid)
+            && state.keyboard_modifiers.is_empty()
+        {
+            commands.push(Command::MoveCursorTo(state.mouse_position_on_grid));
         }
 
         if bindings.get_action(
@@ -794,6 +801,9 @@ struct TerminalViewState {
     /// terminal still needs its own size.
     sized_term: Option<u64>,
     mouse_position_on_grid: TerminalGridPoint,
+    /// Cell of a single click still held down; a release on the same cell
+    /// (no drag) moves the shell cursor there.
+    click_point: Option<TerminalGridPoint>,
 }
 
 impl TerminalViewState {
@@ -807,6 +817,7 @@ impl TerminalViewState {
             size: Size::from([0.0, 0.0]),
             sized_term: None,
             mouse_position_on_grid: TerminalGridPoint::default(),
+            click_point: None,
         }
     }
 

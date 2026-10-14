@@ -38,6 +38,8 @@ pub enum Command {
     SelectUpdate((f32, f32)),
     ProcessLink(LinkAction, Point),
     MouseReport(MouseButton, Modifiers, Point, bool),
+    /// Plain click in a shell: move the text cursor there with arrow keys.
+    MoveCursorTo(Point),
     ProcessAlacrittyEvent(Event),
 }
 
@@ -292,6 +294,11 @@ impl Backend {
             },
             Command::MouseReport(button, modifiers, point, pressed) => {
                 self.process_mouse_report(button, modifiers, point, pressed);
+            },
+            Command::MoveCursorTo(point) => {
+                if let Some(keys) = cursor_move_keys(&term, point) {
+                    self.write(keys);
+                }
             },
         };
 
@@ -690,6 +697,46 @@ fn visible_regex_match_iter<'a>(
     RegexIter::new(start, end, Direction::Right, term, regex)
         .skip_while(move |rm| rm.end().line < viewport_start)
         .take_while(move |rm| rm.start().line <= viewport_end)
+}
+
+/// Arrow keys that move the shell's cursor to `target`, like Ghostty does.
+/// Only works on the cursor's own input line (with its wrapped rows), and
+/// not in full-screen or mouse-aware apps, which handle clicks themselves.
+fn cursor_move_keys(term: &Term<EventProxy>, target: Point) -> Option<Vec<u8>> {
+    let mode = *term.mode();
+    if mode.intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE) {
+        return None;
+    }
+    let grid = term.grid();
+    let cursor = grid.cursor.point;
+    let cols = grid.columns();
+    let last = Column(cols - 1);
+    let wraps = |line: Line| {
+        grid[line][last].flags.contains(term::cell::Flags::WRAPLINE)
+    };
+    let mut first_line = cursor.line;
+    while first_line > grid.topmost_line() && wraps(first_line - 1) {
+        first_line -= 1;
+    }
+    let mut last_line = cursor.line;
+    while last_line < grid.bottommost_line() && wraps(last_line) {
+        last_line += 1;
+    }
+    if target.line < first_line || target.line > last_line {
+        return None;
+    }
+    let offset = |p: Point| p.line.0 as isize * cols as isize + p.column.0 as isize;
+    let delta = offset(target) - offset(cursor);
+    let key: &[u8] = match (delta > 0, mode.contains(TermMode::APP_CURSOR)) {
+        (true, true) => b"\x1bOC",
+        (true, false) => b"\x1b[C",
+        (false, true) => b"\x1bOD",
+        (false, false) => b"\x1b[D",
+    };
+    if delta == 0 {
+        return None;
+    }
+    Some(key.repeat(delta.unsigned_abs()))
 }
 
 /// Small, cheap snapshot of the terminal state used for input handling.
@@ -1095,6 +1142,47 @@ mod tests {
         ));
 
         let expected = vec![0x1b, b'[', b'M', 32 + 64, 32 + 1 + 3, 32 + 1 + 2];
+        assert_eq!(read_until(&out, expected.len()), expected);
+    }
+
+    fn wait_for_cursor(backend: &mut Backend, at: Point) {
+        let start = Instant::now();
+        while backend.renderable_content().cursor_point != at {
+            assert!(start.elapsed() < Duration::from_secs(5), "cursor never at {at:?}");
+            std::thread::sleep(Duration::from_millis(20));
+            backend.sync();
+        }
+    }
+
+    /// A click on the input line sends arrow keys to move the cursor there.
+    #[test]
+    fn click_moves_cursor_with_arrow_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("input.bin");
+        let mut backend = start_recorder("abcdef", &out);
+        wait_for_cursor(&mut backend, Point::new(Line(0), Column(6)));
+
+        backend.handle(Command::MoveCursorTo(Point::new(Line(0), Column(2))));
+        backend.handle(Command::MoveCursorTo(Point::new(Line(0), Column(9))));
+
+        let expected = [b"\x1b[D".repeat(4), b"\x1b[C".repeat(3)].concat();
+        assert_eq!(read_until(&out, expected.len()), expected);
+    }
+
+    /// A long command wraps onto the next row; clicks on either row count,
+    /// clicks on other rows do nothing.
+    #[test]
+    fn click_moves_cursor_across_wrapped_rows_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("input.bin");
+        let mut backend = start_recorder(r"old\r\n%085d", &out);
+        wait_for_cursor(&mut backend, Point::new(Line(2), Column(5)));
+
+        // Row 0 ("old") is not part of the input line.
+        backend.handle(Command::MoveCursorTo(Point::new(Line(0), Column(1))));
+        backend.handle(Command::MoveCursorTo(Point::new(Line(1), Column(3))));
+
+        let expected = b"\x1b[D".repeat(82);
         assert_eq!(read_until(&out, expected.len()), expected);
     }
 }
