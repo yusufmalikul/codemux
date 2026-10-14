@@ -1,6 +1,6 @@
 <p align="center"><img src="crates/app/assets/icon.png" alt="Codemux icon" width="128"></p>
 
-<h1 align="center">codemux</h1>
+<h1 align="center">Codemux</h1>
 
 <p align="center">
   A desktop session manager for Claude Code.<br>
@@ -9,7 +9,7 @@
 
 ![Codemux showing sessions grouped into workspaces in the sidebar, with Claude Code running in a tab](docs/screenshot.png)
 
-> **Note:** codemux is a personal tool. I build it for my own daily use, so it follows my own needs and habits.
+> **Note:** Codemux is a personal tool. I build it for my own daily use, so it follows my own needs and habits.
 > I do not plan to support other setups or take feature requests.
 > If you want to use it, please fork it and change it to fit your needs with your own AI coding agent (such as Claude Code).
 
@@ -20,14 +20,14 @@ One window: a sidebar with all your Claude Code sessions on the left, and the se
 Claude Code saves every session in `~/.claude/projects/`, and you can reopen one with `claude --resume <id>`.
 But after a restart, your terminal tabs are gone, and it is hard to remember which sessions were open.
 
-codemux keeps that list for you:
+Codemux keeps that list for you:
 
 - Shows every session in a sidebar, grouped by time, and in workspaces you create.
 - Shows which sessions are working, which are waiting for input, and which are old.
 - Runs Claude Code in a real terminal inside the app.
 - After a restart, the sessions that were open come back, and you can resume each with one click.
 
-codemux never sends your session files anywhere and never calls the Claude API.
+Codemux never sends your session files anywhere and never calls the Claude API.
 
 ## Build and run
 
@@ -37,7 +37,7 @@ You need [Rust](https://rustup.rs) (stable) and the `claude` CLI on your `PATH`.
 cargo run --release -p codemux
 ```
 
-On macOS, install it as an app, so you can open it from Spotlight (Cmd+Space, type "codemux"), Finder, or Launchpad:
+On macOS, install it as an app, so you can open it from Spotlight (Cmd+Space, type "Codemux"), Finder, or Launchpad:
 
 ```sh
 ./scripts/install-macos.sh
@@ -53,7 +53,7 @@ cargo test
 
 ### Other platforms
 
-codemux is written in Rust with cross-platform libraries ([Iced](https://iced.rs), `alacritty_terminal`),
+Codemux is written in Rust with cross-platform libraries ([Iced](https://iced.rs), `alacritty_terminal`),
 and the code has paths for Linux and Windows too. So it should build there with the same `cargo` command.
 I only use macOS, and I can only test on macOS, so Linux and Windows are not tested yet.
 I encourage you to try it there. It may need some fixes.
