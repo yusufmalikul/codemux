@@ -149,6 +149,12 @@ pub struct Backend {
     hovered_uri: Option<String>,
     /// Colors used to answer color queries (OSC 4/10/11/12).
     theme: Theme,
+    /// Opens a URL in the default app. Tests swap it to record the URL.
+    open_url: fn(&str),
+}
+
+fn open_in_default_app(url: &str) {
+    let _ = open::that_detached(url);
 }
 
 impl Backend {
@@ -206,6 +212,7 @@ impl Backend {
             child_pid,
             hovered_uri: None,
             theme: Theme::default(),
+            open_url: open_in_default_app,
         })
     }
 
@@ -321,19 +328,27 @@ impl Backend {
                 self.last_content.hovered_hyperlink = None;
             },
             LinkAction::Open => {
-                self.open_link();
+                // The caller already holds the terminal lock: read the URL
+                // from `terminal`, never lock again (that hangs the app).
+                if let Some(url) = self.link_url_in(terminal) {
+                    (self.open_url)(&url);
+                }
             },
         };
     }
 
     /// URL of the link under the mouse, if any.
     pub(crate) fn hovered_link_url(&self) -> Option<String> {
+        self.link_url_in(&self.term.lock())
+    }
+
+    /// Like `hovered_link_url`, for a caller that already holds the lock.
+    fn link_url_in(&self, term: &Term<EventProxy>) -> Option<String> {
         if let Some(uri) = &self.hovered_uri {
             return Some(uri.clone());
         }
         let range = self.last_content.hovered_hyperlink.as_ref()?;
         let (start, end) = (*range.start(), *range.end());
-        let term = self.term.lock();
         let grid = term.grid();
         let mut url = String::from(grid.index(start).c);
         for indexed in grid.iter_from(start) {
@@ -343,12 +358,6 @@ impl Backend {
             }
         }
         Some(url)
-    }
-
-    fn open_link(&self) {
-        if let Some(url) = self.hovered_link_url() {
-            let _ = open::that(url);
-        }
     }
 
     fn process_mouse_report(
@@ -965,6 +974,35 @@ mod tests {
             hover_url(&mut backend, 6).as_deref(),
             Some("https://x.io/p")
         );
+    }
+
+    static OPENED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// ⌘+click on a link used to hang the whole app: the click handler held
+    /// the terminal lock and then locked it again to read the URL.
+    #[test]
+    fn cmd_click_opens_link_without_hanging() {
+        for (text, col, want) in [
+            ("see https://x.io/p ok", 6, "https://x.io/p"),
+            (r"\033]8;;https://example.com/a\033\\click here\033]8;;\033\\", 2, "https://example.com/a"),
+        ] {
+            let mut backend = start_printer(text);
+            backend.open_url = |url| OPENED.lock().unwrap().push(url.to_string());
+            assert_eq!(hover_url(&mut backend, col).as_deref(), Some(want));
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                backend.handle(Command::ProcessLink(
+                    LinkAction::Open,
+                    Point::new(Line(0), Column(col)),
+                ));
+                let _ = done_tx.send(());
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+                "⌘+click on {want} hung"
+            );
+            assert!(OPENED.lock().unwrap().contains(&want.to_string()));
+        }
     }
 
     /// Not a pass/fail test: prints the cost of one sync with a full scrollback.
