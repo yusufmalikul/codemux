@@ -649,6 +649,18 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                         if indexed.cell.flags.contains(cell::Flags::ITALIC) {
                             font.style = FontStyle::Italic;
                         }
+                        if let Some(radius) =
+                            drawn_dot_radius(indexed.cell.c, cell_size)
+                        {
+                            frame.fill(
+                                &Path::circle(
+                                    Point::new(cell_center_x, cell_center_y),
+                                    radius,
+                                ),
+                                fg,
+                            );
+                            continue;
+                        }
                         let text = Text {
                             content: indexed.cell.c.to_string(),
                             position: Point::new(cell_center_x, cell_center_y),
@@ -900,11 +912,26 @@ impl BackgroundRect {
     }
 }
 
+/// Claude Code marks its replies with ⏺. Fonts have no text form of it, so
+/// macOS falls back to the color emoji (a blue button). Draw it as a plain
+/// dot in the text color instead, like Ghostty.
+fn drawn_dot_radius(c: char, cell: Size<f32>) -> Option<f32> {
+    (c == '\u{23FA}').then(|| cell.width.min(cell.height) * 0.4)
+}
+
 #[cfg(test)]
 mod tests {
     /// A new tab reuses the widget state of the old one. It must still get
     /// its size, or its PTY keeps the default 50 lines and the bottom rows
     /// are drawn off screen.
+    #[test]
+    fn reply_marker_is_drawn_as_plain_dot() {
+        let cell = Size::new(10.0, 20.0);
+        assert_eq!(drawn_dot_radius('\u{23FA}', cell), Some(4.0));
+        assert_eq!(drawn_dot_radius('a', cell), None);
+        assert_eq!(drawn_dot_radius('\u{25CF}', cell), None);
+    }
+
     #[test]
     fn switching_terminal_with_same_size_still_resizes() {
         let mut state = super::TerminalViewState::new();
