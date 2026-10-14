@@ -52,7 +52,7 @@ cargo test
 
 codemux is written in Rust with cross-platform libraries ([Iced](https://iced.rs), `alacritty_terminal`),
 and the code has paths for Linux and Windows too. So it should build there with the same `cargo` command.
-But I only use macOS, and I can only test on macOS. Linux and Windows are not tested and may not work well.
+But I only use macOS, and I can only test on macOS. Linux and Windows are not tested and may not work well, but I encourage you to try.
 
 ## Project layout
 
