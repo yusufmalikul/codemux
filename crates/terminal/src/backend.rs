@@ -345,6 +345,7 @@ impl Backend {
     }
 
     /// URL of the link under the mouse, if any.
+    #[cfg(test)]
     pub(crate) fn hovered_link_url(&self) -> Option<String> {
         self.link_url_in(&self.term.lock())
     }
