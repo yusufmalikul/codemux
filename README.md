@@ -6,6 +6,10 @@ A desktop session manager for Claude Code.
 
 ![Codemux showing sessions grouped into workspaces in the sidebar, with Claude Code running in a tab](docs/screenshot.png)
 
+> **Note:** codemux is a personal tool. I build it for my own daily use, so it follows my own needs and habits.
+> I do not plan to support other setups or take feature requests.
+> If you want to use it, please fork it and change it to fit your needs with your own AI coding agent (such as Claude Code).
+
 One window: a sidebar with all your Claude Code sessions on the left, and the session's terminal on the right.
 
 ## Why
@@ -52,7 +56,7 @@ cargo test
 | `crates/terminal` | Terminal widget for [Iced](https://iced.rs), built on `alacritty_terminal`. |
 | `crates/app` | The desktop app (sidebar, tabs, settings). |
 
-See [SPEC.md](SPEC.md) for the full design (in Indonesian).
+See [SPEC.md](SPEC.md) for the full design.
 
 ## License
 
