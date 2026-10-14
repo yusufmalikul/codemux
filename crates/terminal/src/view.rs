@@ -423,8 +423,7 @@ impl<'a> TerminalView<'a> {
             },
             BindingAction::Paste => {
                 if let Some(data) = clipboard.read(ClipboardKind::Standard) {
-                    let input: Vec<u8> = data.bytes().collect();
-                    return Some(Command::Write(input));
+                    return Some(Command::Paste(data));
                 }
             },
             BindingAction::Copy => {
@@ -1000,6 +999,38 @@ mod tests {
             };
             view.handle_keyboard_event(&mut state, &mut clipboard, &event);
             assert_eq!(clipboard.0.as_deref(), Some("from claude"));
+        }
+
+        /// ⌘V goes through Paste, so the backend can bracket it.
+        #[test]
+        fn command_v_pastes_clipboard() {
+            let term = Terminal::new(
+                0,
+                Settings {
+                    backend: BackendSettings {
+                        program: "/bin/sh".into(),
+                        args: vec!["-c".into(), "sleep 30".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let view = TerminalView { term: &term };
+            let mut state = TerminalViewState::new();
+            state.keyboard_modifiers = Modifiers::COMMAND;
+            let mut clipboard = TestClipboard(Some("a\nb".into()));
+            let event = iced::keyboard::Event::KeyPressed {
+                key: Key::Character("v".into()),
+                modified_key: Key::Character("v".into()),
+                physical_key: key::Physical::Code(key::Code::KeyV),
+                location: Location::Standard,
+                modifiers: Modifiers::COMMAND,
+                text: None,
+                repeat: false,
+            };
+            let cmd = view.handle_keyboard_event(&mut state, &mut clipboard, &event);
+            assert!(matches!(cmd, Some(Command::Paste(t)) if t == "a\nb"));
         }
     }
 

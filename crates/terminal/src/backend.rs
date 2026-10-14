@@ -31,6 +31,8 @@ const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|http
 #[derive(Debug, Clone)]
 pub enum Command {
     Write(Vec<u8>),
+    /// Clipboard text. Bracketed when the program asked for it.
+    Paste(String),
     /// Wheel scroll: lines (positive = up), mouse cell, modifiers.
     Scroll(i32, Point, Modifiers),
     Resize(Option<Size<f32>>, Option<Size<f32>>),
@@ -275,6 +277,11 @@ impl Backend {
             },
             Command::Write(input) => {
                 self.write(input);
+                term.scroll_display(Scroll::Bottom);
+            },
+            Command::Paste(text) => {
+                let bracketed = term.mode().contains(TermMode::BRACKETED_PASTE);
+                self.write(paste_bytes(&text, bracketed));
                 term.scroll_display(Scroll::Bottom);
             },
             Command::Scroll(delta, point, modifiers) => {
@@ -781,6 +788,21 @@ impl EventListener for EventProxy {
     }
 }
 
+/// Bytes to send for a paste. In bracketed mode the text is wrapped so the
+/// program sees it as one paste, not typed keys. ESC is removed so the text
+/// cannot end the paste early, and ^C because some shells stop the paste on
+/// it. Without bracketed mode, newlines become Enter (CR), like typed keys.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut out = b"\x1b[200~".to_vec();
+        out.extend(text.replace(['\x1b', '\x03'], "").into_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1143,6 +1165,41 @@ mod tests {
         ));
 
         let expected = vec![0x1b, b'[', b'M', 32 + 64, 32 + 1 + 3, 32 + 1 + 2];
+        assert_eq!(read_until(&out, expected.len()), expected);
+    }
+
+    /// Claude Code turns on bracketed paste (?2004). A paste must arrive
+    /// wrapped in ESC[200~ … ESC[201~, or each newline acts as Enter and a
+    /// long paste is sent line by line.
+    #[test]
+    fn paste_is_bracketed_when_program_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("input.bin");
+        let mut backend = start_recorder(r"\033[?2004h", &out);
+        wait_for_mode(&mut backend, TermMode::BRACKETED_PASTE);
+
+        // ESC is removed so the text can never end the paste early.
+        backend.handle(Command::Paste("one\ntwo\x1b[201~\nthree".into()));
+
+        let expected = b"\x1b[200~one\ntwo[201~\nthree\x1b[201~";
+        assert_eq!(
+            String::from_utf8_lossy(&read_until(&out, expected.len())),
+            String::from_utf8_lossy(expected)
+        );
+    }
+
+    /// Without bracketed paste, newlines are sent as Enter (CR), like a
+    /// typed key.
+    #[test]
+    fn paste_sends_newlines_as_enter_without_bracketed_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("input.bin");
+        let mut backend = start_recorder("x", &out);
+        wait_for_cursor(&mut backend, Point::new(Line(0), Column(1)));
+
+        backend.handle(Command::Paste("one\r\ntwo\nthree".into()));
+
+        let expected = b"one\rtwo\rthree";
         assert_eq!(read_until(&out, expected.len()), expected);
     }
 
