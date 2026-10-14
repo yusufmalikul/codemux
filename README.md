@@ -66,9 +66,8 @@ cargo test
 
 ### Linux and Windows
 
-I only use macOS, and the tests run only there. CI (GitHub Actions) only builds Codemux
-on Linux and Windows for every push, and you can download the built app from the run.
-Linux and Windows are not tested, so you may find small problems there.
+I only use macOS, so Linux and Windows are not tested. Build Codemux from source
+with the install script above. You may find small problems there.
 
 Notes:
 
