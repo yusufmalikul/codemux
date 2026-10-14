@@ -44,6 +44,18 @@ On macOS, install it as an app, so you can open it from Spotlight (Cmd+Space, ty
 ./scripts/install-macos.sh
 ```
 
+On Linux, install it for your user, so it shows in the app menu:
+
+```sh
+./scripts/install-linux.sh
+```
+
+On Windows, install it from PowerShell, so it shows in the Start menu:
+
+```powershell
+.\scripts\install-windows.ps1
+```
+
 Run the script again after you pull changes, to update the app.
 
 Run the tests:
@@ -52,12 +64,21 @@ Run the tests:
 cargo test
 ```
 
-### Other platforms
+### Linux and Windows
 
-Codemux is written in Rust with cross-platform libraries ([Iced](https://iced.rs), `alacritty_terminal`),
-and the code has paths for Linux and Windows too. So it should build there with the same `cargo` command.
-I only use macOS, and I can only test on macOS, so Linux and Windows are not tested yet.
-I encourage you to try it there. It may need some fixes.
+I only use macOS day to day. CI (GitHub Actions) builds Codemux and runs all tests
+on macOS, Linux and Windows for every push, so all three build and pass the tests.
+Linux and Windows still get less real use, so you may find small problems there.
+
+Notes:
+
+- **Shortcuts:** macOS uses ⌘ (for example ⌘N). Linux and Windows use Ctrl+Shift
+  (for example Ctrl+Shift+N, and Ctrl+Shift+C / Ctrl+Shift+V to copy and paste),
+  so plain Ctrl keys still go to the terminal.
+- **Linux:** you need a desktop with Vulkan or OpenGL drivers, and `libxkbcommon`
+  (most desktops have both). Shells and `claude` start through your login shell (`$SHELL`).
+- **Windows:** new terminals open PowerShell. Claude sessions start with `cmd.exe /C claude`,
+  so `claude` must be on your `PATH` (the native installer and npm both do this).
 
 ## Project layout
 

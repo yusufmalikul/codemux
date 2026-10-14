@@ -1,6 +1,9 @@
 //! Codemux: a session manager for Claude Code.
 //! Sidebar of sessions on the left, a live terminal on the right.
 
+// Windows: a release build is a GUI app, so no console window opens next to it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use chrono::{DateTime, Local, Utc};
 use codemux_core::detect::{self, ClaudeProc, ProcScanner};
 use codemux_core::launch::{self, ClaudeMode, LaunchSpec};
@@ -43,7 +46,7 @@ fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .title("Codemux")
         .font(include_bytes!("../assets/fonts/FiraSans-Bold.ttf").as_slice())
-        .window_size((1280.0, 800.0))
+        .window(window_settings())
         .subscription(App::subscription)
         .theme(App::theme)
         .run()
@@ -65,6 +68,34 @@ fn set_dock_icon() {
 
 #[cfg(not(target_os = "macos"))]
 fn set_dock_icon() {}
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(1280.0, 800.0),
+        // macOS takes the Dock icon from set_dock_icon. Windows and X11 show this one.
+        icon: if cfg!(target_os = "macos") { None } else { window_icon() },
+        // Wayland finds the icon through the .desktop file with this name
+        // (scripts/install-linux.sh).
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "codemux".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn window_icon() -> Option<iced::window::Icon> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon-256.png")));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    iced::window::icon::from_rgba(buf, info.width, info.height).ok()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TabKind {
@@ -1241,6 +1272,11 @@ fn claude_title_busy(title: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_icon_decodes() {
+        assert!(window_icon().is_some());
+    }
 
     fn fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();

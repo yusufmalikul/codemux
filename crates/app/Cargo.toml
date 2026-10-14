@@ -14,6 +14,7 @@ path = "src/main.rs"
 codemux-core = { path = "../core" }
 codemux-terminal = { path = "../terminal" }
 iced.workspace = true
+png = "0.18"
 rfd = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
@@ -25,3 +26,8 @@ tempfile = "3"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+# Only used when building on Windows (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+ico = "0.4"
+winresource = "0.1"
