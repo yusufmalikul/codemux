@@ -1,8 +1,11 @@
 <p align="center"><img src="crates/app/assets/icon.png" alt="Codemux icon" width="128"></p>
 
-# codemux
+<h1 align="center">codemux</h1>
 
-A desktop session manager for Claude Code.
+<p align="center">
+  A desktop session manager for Claude Code.<br>
+  All your sessions in one window, and they come back after a restart.
+</p>
 
 ![Codemux showing sessions grouped into workspaces in the sidebar, with Claude Code running in a tab](docs/screenshot.png)
 
