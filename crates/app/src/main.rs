@@ -8,7 +8,7 @@ use codemux_core::paths;
 use codemux_core::sessions::{Index, SessionMeta};
 use codemux_core::store::{AppState, Workspace};
 use codemux_terminal as term;
-use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, Column};
+use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -127,6 +127,8 @@ struct App {
     workspaces_version: u64,
     /// Name typed for a new workspace. Some while the name box is shown.
     new_workspace: Option<String>,
+    /// The "+" menu (new session, terminal, workspace) is open.
+    add_menu: bool,
 }
 
 /// One choice in the "Workspace" picker. `id` None is the default workspace.
@@ -147,6 +149,8 @@ enum Message {
     Terminal(term::Event),
     Tick,
     ToggleHideSidebar,
+    /// Open or close the "+" menu in the sidebar.
+    ToggleAddMenu,
     ResizeStart,
     /// Cursor x while dragging the divider.
     ResizeTo(f32),
@@ -216,6 +220,7 @@ impl App {
             default_collapsed: state.default_collapsed,
             workspaces_version: 0,
             new_workspace: None,
+            add_menu: false,
         };
         app.refresh_index();
         app
@@ -372,6 +377,9 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        if matches!(message, Message::NewSession | Message::NewTerminal | Message::NewWorkspaceStart) {
+            self.add_menu = false;
+        }
         match message {
             Message::Terminal(term::Event::BackendCall(id, cmd)) => {
                 let Some(pos) = self.tabs.iter().position(|t| t.id == id) else { return Task::none() };
@@ -450,6 +458,7 @@ impl App {
                 }
             }
             Message::Search(s) => self.search = s,
+            Message::ToggleAddMenu => self.add_menu = !self.add_menu,
             Message::ToggleHideSidebar => {
                 self.hide_sidebar = !self.hide_sidebar;
                 self.save_state();
@@ -643,6 +652,14 @@ impl App {
         }
     }
 
+    /// The session count lives in the search box, so it takes no row of its own.
+    fn search_placeholder(&self) -> String {
+        match self.index.count() {
+            1 => "Search 1 session…".into(),
+            n => format!("Search {n} sessions…"),
+        }
+    }
+
     fn sidebar(&self) -> Element<'_, Message> {
         // Explicit Fill: `lazy` reports Shrink, so the column would not grow by itself.
         let mut list = Column::new().spacing(2).width(Length::Fill);
@@ -675,39 +692,61 @@ impl App {
             (self.index_version, self.workspaces_version, self.search.clone(), selected_session, self.previously_open.clone(), tabs, minute);
         list = list.push(lazy(deps, move |(_, _, _, _, _, tabs, _)| self.history_list(tabs)));
 
-        let workspace_bar: Element<'_, Message> = match &self.new_workspace {
-            Some(name) => row![
-                text_input("Workspace name…", name)
-                    .id(iced::widget::Id::new(WORKSPACE_INPUT))
-                    .on_input(Message::NewWorkspaceName)
-                    .on_submit(Message::NewWorkspaceCreate)
-                    .size(15),
-                button(text("Add").size(14)).on_press(Message::NewWorkspaceCreate),
-                button(text("Cancel").size(14)).on_press(Message::NewWorkspaceCancel).style(button::secondary),
-            ]
-            .spacing(6)
-            .into(),
-            None => button(text("+ New workspace").size(15))
-                .on_press(Message::NewWorkspaceStart)
-                .width(Length::Fill)
-                .style(button::secondary)
-                .into(),
-        };
+        let mac = cfg!(target_os = "macos");
+        let key = |k: &str| if mac { format!("⌘{k}") } else { format!("Ctrl+Shift+{k}") };
+        let mut top = column![row![
+            text_input(&self.search_placeholder(), &self.search).on_input(Message::Search).size(15),
+            tooltip(
+                button(text("+").size(16)).padding([4, 12]).on_press(Message::ToggleAddMenu),
+                container(text("New session, terminal or workspace").size(12)).padding(6).style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ),
+            tooltip(
+                button(text("‹").size(16)).padding([4, 10]).on_press(Message::ToggleHideSidebar).style(button::secondary),
+                container(text(format!("Hide sidebar ({})", key("B"))).size(12)).padding(6).style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)]
+        .spacing(6);
+        if self.add_menu {
+            let item = |label: &str, shortcut: String, msg: Message| {
+                button(row![text(label.to_string()).size(14).width(Length::Fill), text(shortcut).size(12)])
+                    .on_press(msg)
+                    .width(Length::Fill)
+                    .style(button::text)
+            };
+            top = top.push(
+                container(
+                    column![
+                        item("New session", key("N"), Message::NewSession),
+                        item("New terminal", key("T"), Message::NewTerminal),
+                        item("New workspace", String::new(), Message::NewWorkspaceStart),
+                    ]
+                    .spacing(2),
+                )
+                .padding(4)
+                .style(container::rounded_box),
+            );
+        }
+        if let Some(name) = &self.new_workspace {
+            top = top.push(
+                row![
+                    text_input("Workspace name…", name)
+                        .id(iced::widget::Id::new(WORKSPACE_INPUT))
+                        .on_input(Message::NewWorkspaceName)
+                        .on_submit(Message::NewWorkspaceCreate)
+                        .size(15),
+                    button(text("Add").size(14)).on_press(Message::NewWorkspaceCreate),
+                    button(text("Cancel").size(14)).on_press(Message::NewWorkspaceCancel).style(button::secondary),
+                ]
+                .spacing(6),
+            );
+        }
 
-        let shortcut_hint = if cfg!(target_os = "macos") { "⌘N session · ⌘T terminal · ⌘W close · ⌘B hide" } else { "Ctrl+Shift+N / T / W / B" };
         column![
-            row![
-                text_input("Search sessions…", &self.search).on_input(Message::Search).size(15),
-                button(text("‹ Hide").size(14)).on_press(Message::ToggleHideSidebar).style(button::secondary),
-            ]
-            .spacing(6),
-            row![
-                button(text("+ New session").size(15)).on_press(Message::NewSession).width(Length::Fill),
-                button(text(">_ New terminal").size(15)).on_press(Message::NewTerminal).width(Length::Fill),
-            ]
-            .spacing(6),
-            workspace_bar,
-            row![text(shortcut_hint).size(12).width(Length::Fill), text(format!("Sessions: {}", self.index.count())).size(12)],
+            top,
             // Keep a small gap between the rows (and their close buttons) and the scrollbar.
             scrollable(list)
                 .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(6)))
@@ -979,17 +1018,51 @@ struct TabRow {
 }
 
 fn tab_row(t: &TabRow) -> Element<'static, Message> {
+    let label = row![
+        text("●").size(12).color(status_color(t.status)),
+        row_label(t.title.clone(), format!("   {} · {}", t.folder, t.status), true),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    let selected = t.selected;
+    let tab = button(label).on_press(Message::SelectTab(t.id)).width(Length::Fill).style(move |theme, status| open_tab_style(theme, status, selected));
+    // The accent shows through the left padding as a thin bar on the selected tab.
+    let tab = container(tab).padding(iced::Padding { left: 3.0, ..iced::Padding::ZERO }).style(move |_: &iced::Theme| container::Style {
+        background: selected.then(|| ACCENT.into()),
+        border: iced::border::rounded(4),
+        ..container::Style::default()
+    });
     row![
-        button(row_label(t.title.clone(), format!("   {} · {}", t.folder, t.status), true))
-            .on_press(Message::SelectTab(t.id))
-            .width(Length::Fill)
-            // Green marks a running tab; the selected one stays blue so it still stands out.
-            .style(if t.selected { button::primary } else { button::success }),
+        tab,
         button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(t.id)).style(close_style),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center)
     .into()
+}
+
+/// Dot color for a tab: amber when Claude waits for input (it needs you),
+/// green while it works, gray for a plain shell.
+fn status_color(status: &str) -> iced::Color {
+    match status {
+        "waiting" => iced::Color::from_rgb8(0xf0, 0xb4, 0x29),
+        "working" => iced::Color::from_rgb8(0x4c, 0xc3, 0x6a),
+        _ => iced::Color::from_rgb8(0x80, 0x80, 0x88),
+    }
+}
+
+/// Open tabs get a soft background, so they stand out from history rows
+/// without being louder than the terminal. The selected one gets a soft
+/// accent tint (plus the bar beside it).
+fn open_tab_style(theme: &iced::Theme, status: button::Status, selected: bool) -> button::Style {
+    let base = button::text(theme, status);
+    let alpha = match (selected, status) {
+        (true, _) => 0.45,
+        (false, button::Status::Hovered | button::Status::Pressed) => 0.12,
+        (false, _) => 0.06,
+    };
+    let color = if selected { ACCENT.scale_alpha(alpha) } else { iced::Color::WHITE.scale_alpha(alpha) };
+    button::Style { background: Some(color.into()), border: iced::border::rounded(4), ..base }
 }
 
 /// Two-line sidebar label. The name is larger so it is easy to scan, and
@@ -1330,6 +1403,18 @@ mod tests {
         assert!(app.confirm_delete_workspace.is_none());
     }
 
+    /// New session, terminal and workspace live in the "+" menu. Picking
+    /// one closes the menu.
+    #[test]
+    fn add_menu_opens_and_closes() {
+        let (_dir, mut app) = fixture();
+        assert!(!found_after_frames(&mut app, vec![], "New terminal"), "menu shown before \"+\"");
+        assert!(found_after_frames(&mut app, vec![Message::ToggleAddMenu], "New terminal"), "menu not shown");
+        assert!(found_after_frames(&mut app, vec![], "New workspace"));
+        assert!(!found_after_frames(&mut app, vec![Message::NewTerminal], "New workspace"), "menu stays open");
+        assert_eq!(app.tabs.len(), 1);
+    }
+
     #[test]
     fn empty_workspace_name_is_ignored() {
         let (_dir, mut app) = fixture();
@@ -1345,7 +1430,7 @@ mod tests {
         let (_dir, mut app) = fixture();
         assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"), "session not visible");
         assert!(found_after_frames(&mut app, vec![], "TODAY"), "time group not visible");
-        assert!(found_after_frames(&mut app, vec![], "Sessions: 1"), "session count not visible");
+        assert_eq!(app.search_placeholder(), "Search 1 session…", "session count not shown");
     }
 
     /// A session whose folder was deleted cannot be resumed, so it must
@@ -1356,7 +1441,7 @@ mod tests {
         assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
         std::fs::remove_dir_all(dir.path().join("work")).unwrap();
         assert!(!found_after_frames(&mut app, vec![Message::Tick], "Fix webhook retry"), "row still shown");
-        assert!(found_after_frames(&mut app, vec![], "Sessions: 0"), "count not updated");
+        assert_eq!(app.search_placeholder(), "Search 0 sessions…", "count not updated");
 
         // Restore the folder: the session comes back.
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
