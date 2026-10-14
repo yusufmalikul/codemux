@@ -114,6 +114,9 @@ struct Tab {
     /// A `claude` process found inside a Shell tab.
     claude: Option<ClaudeProc>,
     cwd: PathBuf,
+    /// Workspace the tab is shown in. None is the default workspace. Kept in
+    /// step with the workspace of its session, once it has one.
+    workspace: Option<u64>,
     last_output: Instant,
     /// Busy or idle, read from the title Claude sets. None until Claude sets one.
     busy: Option<bool>,
@@ -302,6 +305,12 @@ impl App {
             },
             ..Default::default()
         };
+        // A resumed session keeps its workspace. Anything else opens in the
+        // workspace the user is looking at.
+        let workspace = match session_id.as_deref().and_then(|s| self.workspace_of(s)) {
+            Some(ws) => Some(ws),
+            None => self.current_workspace(),
+        };
         match term::Terminal::new(id, settings) {
             Ok(mut t) => {
                 t.handle(term::Command::SetScaleFactor(self.scale_factor));
@@ -313,10 +322,12 @@ impl App {
                     session_id,
                     claude: None,
                     cwd: spec.cwd,
+                    workspace,
                     last_output: Instant::now(),
                     busy: None,
                 });
                 self.selected = Selected::Tab(id);
+                self.adopt_tab_sessions();
                 self.reveal_tab(id);
                 self.error = None;
                 self.save_state();
@@ -342,8 +353,7 @@ impl App {
     /// hidden inside a collapsed workspace.
     fn reveal_tab(&mut self, id: u64) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
-        let ws = tab.session_id.as_deref().and_then(|s| self.workspace_of(s));
-        let collapsed = match ws {
+        let collapsed = match tab.workspace {
             Some(ws) => self.workspaces.iter_mut().find(|w| w.id == ws).map(|w| &mut w.collapsed),
             None => Some(&mut self.default_collapsed),
         };
@@ -456,6 +466,7 @@ impl App {
                 self.refresh_index();
                 let before: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
                 self.detect();
+                self.adopt_tab_sessions();
                 let after: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
                 if before != after {
                     self.save_state();
@@ -554,11 +565,17 @@ impl App {
             Message::DeleteWorkspace(id) => {
                 self.confirm_delete_workspace = None;
                 self.workspaces.retain(|w| w.id != id);
+                for tab in self.tabs.iter_mut().filter(|t| t.workspace == Some(id)) {
+                    tab.workspace = None;
+                }
                 self.workspaces_changed();
             }
             Message::MoveSession(sid, to) => {
                 for w in &mut self.workspaces {
                     w.sessions.retain(|s| s != &sid);
+                }
+                for tab in self.tabs.iter_mut().filter(|t| t.session_id.as_deref() == Some(sid.as_str())) {
+                    tab.workspace = to;
                 }
                 if let Some(w) = to.and_then(|id| self.workspaces.iter_mut().find(|w| w.id == id)) {
                     w.sessions.push(sid);
@@ -611,6 +628,44 @@ impl App {
 
     fn workspace_of(&self, sid: &str) -> Option<u64> {
         self.workspaces.iter().find(|w| w.sessions.iter().any(|s| s == sid)).map(|w| w.id)
+    }
+
+    /// The workspace of what the user is looking at: the selected tab or
+    /// session. None is the default workspace.
+    fn current_workspace(&self) -> Option<u64> {
+        match &self.selected {
+            Selected::Tab(id) => self.tabs.iter().find(|t| t.id == *id).and_then(|t| t.workspace),
+            Selected::Session(sid) => self.workspace_of(sid),
+            Selected::None => None,
+        }
+    }
+
+    /// Keep tabs and their sessions in the same workspace. A session in no
+    /// workspace joins its tab's workspace (a new session, or Claude found in
+    /// a terminal). A session already in a workspace pulls its tab there
+    /// (for example after /resume inside Claude).
+    fn adopt_tab_sessions(&mut self) {
+        let mut changed = false;
+        for i in 0..self.tabs.len() {
+            let Some(sid) = self.tabs[i].session_id.clone() else { continue };
+            match (self.workspace_of(&sid), self.tabs[i].workspace) {
+                (Some(ws), tab_ws) if Some(ws) != tab_ws => {
+                    self.tabs[i].workspace = Some(ws);
+                    changed = true;
+                }
+                (None, Some(tab_ws)) => match self.workspaces.iter_mut().find(|w| w.id == tab_ws) {
+                    Some(w) => {
+                        w.sessions.push(sid);
+                        changed = true;
+                    }
+                    None => self.tabs[i].workspace = None,
+                },
+                _ => {}
+            }
+        }
+        if changed {
+            self.workspaces_changed();
+        }
     }
 
     fn workspace_choices(&self) -> Vec<WorkspaceChoice> {
@@ -753,6 +808,7 @@ impl App {
                 TabRow {
                     id: tab.id,
                     session: tab.session_id.clone(),
+                    workspace: tab.workspace,
                     title,
                     folder,
                     status,
@@ -854,10 +910,9 @@ impl App {
         // While searching, open every workspace so no match is hidden.
         let searching = !q.is_empty();
 
-        // Tabs per workspace. Tabs with no session, or a session in no
-        // workspace, belong to the default workspace.
+        // Tabs per workspace.
         let ws_tabs = |id: Option<u64>| -> Vec<&TabRow> {
-            tabs.iter().filter(|t| t.session.as_deref().and_then(|s| self.workspace_of(s)) == id).filter(|t| tab_matches(t)).collect()
+            tabs.iter().filter(|t| t.workspace == id).filter(|t| tab_matches(t)).collect()
         };
 
         for ws in &self.workspaces {
@@ -1120,6 +1175,7 @@ fn delete_workspace_confirm(id: u64, name: &str) -> Element<'static, Message> {
 struct TabRow {
     id: u64,
     session: Option<String>,
+    workspace: Option<u64>,
     title: String,
     folder: String,
     status: &'static str,
@@ -1364,6 +1420,7 @@ mod tests {
         let (dir, mut app) = fixture();
         let _ = app.update(Message::NewTerminal);
         app.tabs[0].session_id = Some("s1".into());
+        app.adopt_tab_sessions();
         let _ = app.update(Message::DeleteConfirm("s1".into()));
         assert!(dir.path().join("projects/-tmp-proj/s1.jsonl").exists());
         assert!(app.error.is_some());
@@ -1457,6 +1514,7 @@ mod tests {
             let _ = app.update(m);
         }
         app.tabs[0].session_id = Some("s1".into());
+        app.adopt_tab_sessions();
         let tab = app.tabs[0].id;
         // The title also shows above the terminal, so look for the details
         // line, which only the sidebar row has.
@@ -1474,6 +1532,41 @@ mod tests {
 
         assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], row), "not opened on select");
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"));
+    }
+
+    /// A new terminal opens in the workspace the user is looking at, and the
+    /// Claude session later found in it joins that workspace too.
+    #[test]
+    fn new_terminal_opens_in_the_current_workspace() {
+        let (_dir, mut app) = fixture();
+        for m in [
+            Message::NewWorkspaceStart,
+            Message::NewWorkspaceName("Backend".into()),
+            Message::NewWorkspaceCreate,
+            Message::MoveSession("s1".into(), Some(1)),
+            Message::SelectSession("s1".into()),
+            Message::NewTerminal,
+        ] {
+            let _ = app.update(m);
+        }
+        let row = format!("   {} · shell", folder_label(&app.tabs[0].cwd));
+        assert!(found_after_frames(&mut app, vec![], "▾ Backend  (2)  ● 1 open"), "terminal not in Backend");
+        assert!(found_after_frames(&mut app, vec![], &row), "tab row hidden");
+        assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+
+        // A second terminal opened from that tab stays in Backend too.
+        let _ = app.update(Message::NewTerminal);
+        assert!(found_after_frames(&mut app, vec![], "▾ Backend  (3)  ● 2 open"));
+
+        // Claude found in the tab: its session is saved into Backend.
+        app.tabs[1].session_id = Some("s2".into());
+        app.adopt_tab_sessions();
+        assert_eq!(app.workspaces[0].sessions, vec!["s1".to_string(), "s2".to_string()]);
+
+        // Moving the session moves its tab with it.
+        let _ = app.update(Message::MoveSession("s2".into(), None));
+        assert!(found_after_frames(&mut app, vec![], "▾ Backend  (2)  ● 1 open"));
+        assert!(found_after_frames(&mut app, vec![], "▾ Default  (1)  ● 1 open"));
     }
 
     /// Claude redraws its status line now and then while idle. That output
