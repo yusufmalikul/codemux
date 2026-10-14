@@ -10,7 +10,7 @@
 
 ![Codemux showing sessions grouped into workspaces in the sidebar, with Claude Code running in a tab](docs/screenshot.png)
 
-> **Note:** Codemux is a personal tool. I build it for my own daily use, so it follows my own needs and habits.
+> ⚠️ **Note:** Codemux is a personal tool. I build it for my own daily use, so it follows my own needs and habits.
 > I do not plan to support other setups or take feature requests.
 > If you want to use it, please fork it and change it to fit your needs with your own AI coding agent (such as Claude Code).
 
