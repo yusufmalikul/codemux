@@ -10,7 +10,7 @@ use codemux_core::store::{AppState, Workspace};
 use codemux_terminal as term;
 use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,7 @@ const DEFAULT_WORKSPACE: &str = "Default";
 /// Left indent of rows inside a workspace, so the sidebar reads as a tree.
 const TREE_INDENT: f32 = 16.0;
 const WORKSPACE_INPUT: &str = "new-workspace-name";
+const RENAME_INPUT: &str = "rename-session";
 /// iced ships only Fira Sans Regular, so bold text fell back to another
 /// font. The app loads Fira Sans Bold itself and asks for it by name.
 const BOLD: iced::Font = iced::Font {
@@ -129,6 +130,10 @@ struct App {
     new_workspace: Option<String>,
     /// The "+" menu (new session, terminal, workspace) is open.
     add_menu: bool,
+    /// Names the user gave to sessions, by session ID (saved in state.json).
+    session_names: BTreeMap<String, String>,
+    /// Session being renamed, and the text typed so far.
+    renaming: Option<(String, String)>,
 }
 
 /// One choice in the "Workspace" picker. `id` None is the default workspace.
@@ -184,6 +189,12 @@ enum Message {
     DeleteWorkspace(u64),
     /// Move a session to a workspace. None is the default workspace.
     MoveSession(String, Option<u64>),
+    /// Show the name box for a session.
+    RenameStart(String),
+    RenameInput(String),
+    /// Save the typed name. An empty name goes back to Claude's title.
+    RenameSave,
+    RenameCancel,
 }
 
 impl App {
@@ -221,6 +232,8 @@ impl App {
             workspaces_version: 0,
             new_workspace: None,
             add_menu: false,
+            session_names: state.session_names,
+            renaming: None,
         };
         app.refresh_index();
         app
@@ -241,6 +254,7 @@ impl App {
             sidebar_width: Some(self.sidebar_width),
             workspaces: self.workspaces.clone(),
             default_collapsed: self.default_collapsed,
+            session_names: self.session_names.clone(),
         }
         .save(path);
     }
@@ -520,6 +534,29 @@ impl App {
                 }
                 self.workspaces_changed();
             }
+            Message::RenameStart(sid) => {
+                let current = self.session_names.get(&sid).cloned().unwrap_or_default();
+                self.renaming = Some((sid, current));
+                return iced::widget::operation::focus(iced::widget::Id::new(RENAME_INPUT));
+            }
+            Message::RenameInput(text) => {
+                if let Some((_, t)) = &mut self.renaming {
+                    *t = text;
+                }
+            }
+            Message::RenameCancel => self.renaming = None,
+            Message::RenameSave => {
+                if let Some((sid, name)) = self.renaming.take() {
+                    let name = name.trim().to_string();
+                    if name.is_empty() {
+                        self.session_names.remove(&sid);
+                    } else {
+                        self.session_names.insert(sid, name);
+                    }
+                    // Names show in the cached sidebar tree.
+                    self.workspaces_changed();
+                }
+            }
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
                 for tab in &mut self.tabs {
@@ -569,6 +606,7 @@ impl App {
                 for w in &mut self.workspaces {
                     w.sessions.retain(|s| s != sid);
                 }
+                self.session_names.remove(sid);
                 self.workspaces_version += 1;
                 if self.selected == Selected::Session(sid.to_string()) {
                     self.selected = Selected::None;
@@ -630,8 +668,16 @@ impl App {
         iced::Theme::custom("codemux", palette)
     }
 
+    /// Title order from spec 8.3: the user's own name first, then Claude's title.
+    fn session_title(&self, m: &SessionMeta) -> String {
+        self.session_names.get(&m.id).cloned().unwrap_or_else(|| m.title())
+    }
+
     fn tab_title(&self, tab: &Tab) -> (String, String) {
         let folder = folder_label(&tab.cwd);
+        if let Some(name) = tab.session_id.as_ref().and_then(|s| self.session_names.get(s)) {
+            return (name.clone(), folder);
+        }
         match tab.session_id.as_deref().and_then(|s| self.index.get(s)) {
             Some(m) if m.ai_title.is_some() || m.agent_name.is_some() || m.first_prompt.is_some() => {
                 (m.title(), folder)
@@ -764,7 +810,7 @@ impl App {
         let q = self.search.to_lowercase();
         let matches = |m: &SessionMeta| {
             q.is_empty()
-                || [Some(m.title()), m.cwd.as_ref().map(|c| c.display().to_string()), m.git_branch.clone(), m.last_prompt.clone()]
+                || [Some(self.session_title(m)), Some(m.title()), m.cwd.as_ref().map(|c| c.display().to_string()), m.git_branch.clone(), m.last_prompt.clone()]
                     .into_iter()
                     .flatten()
                     .any(|s| s.to_lowercase().contains(&q))
@@ -870,7 +916,7 @@ impl App {
             sub.push(b.clone());
         }
         sub.push(relative_time(m.sort_time()));
-        button(row_label(m.title(), format!("   {}", sub.join(" · ")), false))
+        button(row_label(self.session_title(m), format!("   {}", sub.join(" · ")), false))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -887,8 +933,12 @@ impl App {
                     if let Some(b) = meta.and_then(|m| m.git_branch.clone()) {
                         info.push(b);
                     }
+                    let heading: Element<'_, Message> = match &tab.session_id {
+                        Some(sid) => self.title_or_rename(sid, title, 15, 12),
+                        None => text(title).size(15).into(),
+                    };
                     let header = row![
-                        column![text(title).size(15), text(info.join(" · ")).size(11)].width(Length::Fill),
+                        column![heading, text(info.join(" · ")).size(11)].width(Length::Fill),
                         button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger),
                     ]
                     .padding(8);
@@ -900,7 +950,7 @@ impl App {
             Selected::Session(sid) => match self.index.get(sid) {
                 Some(m) => {
                     let mut col = column![
-                        text(m.title()).size(20),
+                        self.title_or_rename(&m.id, self.session_title(m), 20, 13),
                         text(m.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default()).size(12),
                     ]
                     .spacing(8);
@@ -956,6 +1006,34 @@ impl App {
         let credit = container(text("Created by yusufmalikul").size(13)).width(Length::Fill).align_right(Length::Fill).padding([2, 8]);
         let body = container(body).width(Length::Fill).height(Length::Fill);
         container(col.push(body).push(credit)).width(Length::Fill).height(Length::Fill).into()
+    }
+}
+
+impl App {
+    /// A session's title with a "Rename" button, or the name box while it is
+    /// being renamed.
+    fn title_or_rename(&self, sid: &str, title: String, size: u32, button_size: u32) -> Element<'_, Message> {
+        if let Some((_, typed)) = self.renaming.as_ref().filter(|(s, _)| s == sid) {
+            return row![
+                text_input("Session name… (empty = Claude's title)", typed)
+                    .id(iced::widget::Id::new(RENAME_INPUT))
+                    .on_input(Message::RenameInput)
+                    .on_submit(Message::RenameSave)
+                    .size(size as f32),
+                button(text("Save").size(button_size)).on_press(Message::RenameSave),
+                button(text("Cancel").size(button_size)).on_press(Message::RenameCancel).style(button::secondary),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .into();
+        }
+        row![
+            text(title).size(size),
+            button(text("Rename").size(button_size)).padding([2, 8]).on_press(Message::RenameStart(sid.to_string())).style(button::secondary),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 }
 
@@ -1413,6 +1491,39 @@ mod tests {
         assert!(found_after_frames(&mut app, vec![], "New workspace"));
         assert!(!found_after_frames(&mut app, vec![Message::NewTerminal], "New workspace"), "menu stays open");
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// A renamed session shows its new name in the sidebar, is found by
+    /// search, and keeps the name after restart. An empty name goes back to
+    /// Claude's title. The session file is never changed.
+    #[test]
+    fn rename_session_shows_new_name_and_is_remembered() {
+        let (dir, mut app) = fixture();
+        let file = dir.path().join("projects/-tmp-proj/s1.jsonl");
+        let before = std::fs::read(&file).unwrap();
+        let msgs = vec![
+            Message::SelectSession("s1".into()),
+            Message::RenameStart("s1".into()),
+            Message::RenameInput("  Webhook work ".into()),
+            Message::RenameSave,
+        ];
+        assert!(found_after_frames(&mut app, msgs, "Webhook work"), "new name not shown");
+        assert!(!found_after_frames(&mut app, vec![], "Fix webhook retry"), "old title still shown");
+        assert!(found_after_frames(&mut app, vec![Message::Search("webhook work".into())], "Webhook work"), "not found by search");
+        let _ = app.update(Message::Search(String::new()));
+        assert_eq!(std::fs::read(&file).unwrap(), before, "session file changed");
+
+        let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        assert!(found_after_frames(&mut again, vec![], "Webhook work"), "name not remembered");
+
+        // A tab running the session shows the name too.
+        let _ = again.update(Message::NewTerminal);
+        again.tabs[0].session_id = Some("s1".into());
+        assert_eq!(again.tab_title(&again.tabs[0]).0, "Webhook work");
+
+        let msgs = vec![Message::RenameStart("s1".into()), Message::RenameInput("   ".into()), Message::RenameSave];
+        assert!(found_after_frames(&mut again, msgs, "Fix webhook retry"), "empty name did not reset");
+        assert!(again.session_names.is_empty());
     }
 
     #[test]

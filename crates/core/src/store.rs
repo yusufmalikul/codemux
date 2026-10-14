@@ -1,6 +1,7 @@
 //! App-owned state (spec 10). Saved atomically: write a temp file, then rename.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -25,6 +26,10 @@ pub struct AppState {
     /// The default workspace is collapsed in the sidebar.
     #[serde(default)]
     pub default_collapsed: bool,
+    /// Names the user gave to sessions, by session ID. Only shown in the app;
+    /// Claude's session files are never changed.
+    #[serde(default)]
+    pub session_names: BTreeMap<String, String>,
 }
 
 /// A named group of sessions, shown as a folder in the sidebar tree.
@@ -73,7 +78,7 @@ mod tests {
         let p = dir.path().join("sub").join("state.json");
         let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sidebar: true, sidebar_width: Some(420.0),
             workspaces: vec![Workspace { id: 1, name: "Work".into(), sessions: vec!["a".into()], collapsed: true }],
-            default_collapsed: true };
+            default_collapsed: true, session_names: BTreeMap::from([("a".into(), "My name".into())]) };
         s.save(&p).unwrap();
         let loaded = AppState::load(&p);
         assert_eq!(loaded.open_sessions, s.open_sessions);
@@ -81,6 +86,7 @@ mod tests {
         assert_eq!(loaded.sidebar_width, Some(420.0));
         assert_eq!(loaded.workspaces, s.workspaces);
         assert!(loaded.default_collapsed);
+        assert_eq!(loaded.session_names, s.session_names);
         assert_eq!(loaded.version, STATE_VERSION);
         assert!(!p.with_extension("tmp").exists());
     }
