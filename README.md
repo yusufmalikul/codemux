@@ -1,6 +1,7 @@
-<p align="center"><img src="crates/app/assets/icon.png" alt="Codemux icon" width="128"></p>
-
-<h1 align="center">Codemux</h1>
+<h1 align="center">
+  <img src="crates/app/assets/icon.png" alt="Codemux icon" width="128"><br>
+  Codemux
+</h1>
 
 <p align="center">
   A desktop session manager for Claude Code.<br>
