@@ -11,10 +11,24 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const TITLE_MAX: usize = 80;
-/// How many recent prompts each session keeps for the detail view.
-pub const RECENT_PROMPTS: usize = 5;
-/// Longest stored recent prompt, in characters. Pastes can be huge.
-const RECENT_PROMPT_MAX: usize = 600;
+/// How many recent messages (prompts and replies) each session keeps for the
+/// detail view.
+pub const RECENT_MESSAGES: usize = 10;
+/// Longest stored recent message, in characters. Pastes and replies can be huge.
+const RECENT_MESSAGE_MAX: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// One message in the conversation: a typed prompt or Claude's reply text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub text: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionMeta {
@@ -26,8 +40,9 @@ pub struct SessionMeta {
     pub agent_name: Option<String>,
     pub first_prompt: Option<String>,
     pub last_prompt: Option<String>,
-    /// Last few real typed prompts, oldest first (at most `RECENT_PROMPTS`).
-    pub recent_prompts: Vec<String>,
+    /// Last few typed prompts and Claude replies, oldest first (at most
+    /// `RECENT_MESSAGES`).
+    pub recent_messages: Vec<ChatMessage>,
     pub last_activity: Option<DateTime<Utc>>,
     /// File modified time. Used when no timestamp is found.
     pub modified: Option<SystemTime>,
@@ -92,15 +107,41 @@ fn user_text(message: &Value) -> Option<String> {
     Some(text.to_string())
 }
 
-fn push_recent(list: &mut Vec<String>, text: String) {
-    let text = if text.chars().count() > RECENT_PROMPT_MAX {
-        let cut: String = text.chars().take(RECENT_PROMPT_MAX).collect();
+/// Reply text of an assistant line. Thinking and tool calls are left out.
+fn assistant_text(message: &Value) -> Option<String> {
+    let parts = message.get("content")?.as_array()?;
+    let text = parts
+        .iter()
+        .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|p| p.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn cut_long(text: String) -> String {
+    if text.chars().count() > RECENT_MESSAGE_MAX {
+        let cut: String = text.chars().take(RECENT_MESSAGE_MAX).collect();
         format!("{cut}…")
     } else {
         text
-    };
-    list.push(text);
-    if list.len() > RECENT_PROMPTS {
+    }
+}
+
+/// Add a message. Claude writes one reply as many lines (split by tool
+/// calls), so reply text right after reply text joins the same message.
+fn push_recent(list: &mut Vec<ChatMessage>, role: Role, text: String) {
+    if role == Role::Assistant {
+        if let Some(last) = list.last_mut().filter(|m| m.role == Role::Assistant) {
+            if !last.text.ends_with('…') {
+                last.text = cut_long(format!("{}\n\n{text}", last.text));
+            }
+            return;
+        }
+    }
+    list.push(ChatMessage { role, text: cut_long(text) });
+    if list.len() > RECENT_MESSAGES {
         list.remove(0);
     }
 }
@@ -143,7 +184,12 @@ fn apply_line(meta: &mut SessionMeta, line: &str) {
                     if meta.first_prompt.is_none() {
                         meta.first_prompt = Some(t.clone());
                     }
-                    push_recent(&mut meta.recent_prompts, t);
+                    push_recent(&mut meta.recent_messages, Role::User, t);
+                }
+            }
+            if kind == "assistant" && !is_side {
+                if let Some(t) = v.get("message").and_then(assistant_text) {
+                    push_recent(&mut meta.recent_messages, Role::Assistant, t);
                 }
             }
         }
@@ -363,10 +409,10 @@ not json at all
     }
 
     #[test]
-    fn keeps_last_five_prompts_in_order() {
+    fn keeps_last_ten_messages_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let mut body = String::from(FIXTURE);
-        for i in 1..=6 {
+        for i in 1..=11 {
             body.push_str(&format!(
                 r#"{{"type":"user","cwd":"/tmp/proj","isSidechain":false,"message":{{"role":"user","content":"prompt {i}"}}}}"#
             ));
@@ -376,11 +422,39 @@ not json at all
         body.push('\n');
         let f = write_fixture(dir.path(), &body);
         let m = parse_file(&f).unwrap();
-        assert_eq!(m.recent_prompts, ["prompt 2", "prompt 3", "prompt 4", "prompt 5", "prompt 6"]);
+        let texts: Vec<&str> = m.recent_messages.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, (2..=11).map(|i| format!("prompt {i}")).collect::<Vec<_>>());
         assert_eq!(m.first_prompt.as_deref(), Some("fix the   webhook retry"));
 
         let short = parse_file(&write_fixture(dir.path(), FIXTURE)).unwrap();
-        assert_eq!(short.recent_prompts, ["fix the   webhook retry"]);
+        let texts: Vec<&str> = short.recent_messages.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["fix the   webhook retry"]);
+    }
+
+    /// Claude's reply text sits between the prompts. A reply split by tool
+    /// calls is one message. Thinking, tool calls and tool results are left out.
+    #[test]
+    fn recent_messages_include_claude_replies() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"type":"user","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"user","content":"push it"}}
+{"type":"assistant","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}
+{"type":"assistant","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Running tests first."}]}}
+{"type":"assistant","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}
+{"type":"user","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}
+{"type":"assistant","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Pushed."}]}}
+{"type":"assistant","cwd":"/tmp/proj","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"subagent text"}]}}
+{"type":"user","cwd":"/tmp/proj","isSidechain":false,"message":{"role":"user","content":"thanks"}}
+"#;
+        let m = parse_file(&write_fixture(dir.path(), body)).unwrap();
+        let got: Vec<(Role, &str)> = m.recent_messages.iter().map(|c| (c.role, c.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (Role::User, "push it"),
+                (Role::Assistant, "Running tests first.\n\nPushed."),
+                (Role::User, "thanks"),
+            ]
+        );
     }
 
     #[test]

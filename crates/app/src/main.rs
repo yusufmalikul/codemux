@@ -8,7 +8,7 @@ use chrono::{DateTime, Local, Utc};
 use codemux_core::detect::{self, ClaudeProc, ProcScanner};
 use codemux_core::launch::{self, ClaudeMode, LaunchSpec};
 use codemux_core::paths;
-use codemux_core::sessions::{Index, SessionMeta};
+use codemux_core::sessions::{Index, Role, SessionMeta};
 use codemux_core::store::{AppState, Workspace};
 use codemux_terminal as term;
 use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
@@ -1070,15 +1070,19 @@ impl App {
                         .into()
                     };
                     col = col.push(actions);
-                    if !m.recent_prompts.is_empty() {
-                        let mut prompts = column![text("Recent prompts").size(14)].spacing(8);
+                    if !m.recent_messages.is_empty() {
+                        let mut prompts = column![text("Recent conversation").size(14)].spacing(8);
                         // Oldest first, newest at the bottom, like Claude Code.
-                        for p in &m.recent_prompts {
+                        for msg in &m.recent_messages {
+                            let (who, style): (&str, fn(&iced::Theme) -> container::Style) = match msg.role {
+                                Role::User => ("You", container::rounded_box),
+                                Role::Assistant => ("Claude", container::bordered_box),
+                            };
                             prompts = prompts.push(
-                                container(text(p.clone()).size(12))
+                                container(column![text(who).size(11), text(msg.text.clone()).size(12)].spacing(4))
                                     .padding(8)
                                     .width(Length::Fill)
-                                    .style(container::rounded_box),
+                                    .style(style),
                             );
                         }
                         col = col.push(rule::horizontal(1)).push(prompts);
