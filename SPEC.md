@@ -315,6 +315,9 @@ Use case: one account hits its usage limit, and the user continues the same sess
    uses the account of the selected tab or session.
 5. **Switching.** The session view (and the tab header) has an "Account" picker. Picking another account:
    - Refused while Claude works, or when Claude runs inside a "New terminal" tab (the user must exit it there).
+   - Refused while any Claude process still has the session open. Claude lists its running sessions in
+     `<config>/sessions/<pid>.json`; a listed PID that still runs blocks the move (for example Claude in another
+     terminal app).
    - A Claude tab that waits for input is closed. The app waits until the process has exited (up to 10 seconds).
    - The session files move to the other folder: `projects/<folder>/<id>.jsonl`, `projects/<folder>/<id>/` and
      `file-history/<id>/`. First everything is copied under a temporary name (an error here changes nothing), then
@@ -324,6 +327,10 @@ Use case: one account hits its usage limit, and the user continues the same sess
    changed file is used.
 
 ## 12. Terminal widget (`crates/terminal`)
+
+Closing a terminal (unix): send SIGHUP to the program and keep reading its output until it exits; after 3 seconds,
+SIGKILL. alacritty's own shutdown stops reading first, then sends SIGHUP and waits. Claude Code writes output when it
+gets SIGHUP, so it blocked on the full PTY and never exited (one stuck `claude` per closed tab).
 
 Started from the `iced_term` 0.8 code (MIT). Attribution is in `NOTICE` and in the header of copied files.
 

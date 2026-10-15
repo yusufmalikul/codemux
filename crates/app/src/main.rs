@@ -175,6 +175,9 @@ struct App {
     backup_dir: Option<PathBuf>,
     /// New accounts get a config folder here (`<home>/.claude-<name>`).
     home: PathBuf,
+    /// Tests record resumes here instead of starting the real `claude`.
+    #[cfg(test)]
+    resumed: Vec<LaunchSpec>,
     scanner: ProcScanner,
     state_path: Option<PathBuf>,
     /// Sessions that were open when the app last ran (spec 11.4).
@@ -323,6 +326,8 @@ impl App {
             pending_switch: None,
             backup_dir,
             home: paths::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+            #[cfg(test)]
+            resumed: Vec::new(),
             scanner: ProcScanner::default(),
             state_path,
             previously_open,
@@ -503,6 +508,12 @@ impl App {
         match launch::claude(cwd, &ClaudeMode::Resume(sid.clone()), self.launch_config(account).as_deref()) {
             Some(spec) => {
                 self.previously_open.retain(|s| s != &sid);
+                #[cfg(test)]
+                {
+                    self.resumed.push(spec);
+                    Task::none()
+                }
+                #[cfg(not(test))]
                 self.spawn(TabKind::Claude, spec, Some(sid), account)
             }
             None => {
@@ -907,6 +918,10 @@ impl App {
             return Task::none();
         }
         let Some(tab) = self.tabs.iter().find(|t| t.session_id.as_deref() == Some(sid.as_str())) else {
+            if self.running_claude(&sid, from).is_some() {
+                self.error = Some("Claude still runs this session outside Codemux. Exit it there first, then switch.".into());
+                return Task::none();
+            }
             self.pending_switch = Some(PendingSwitch { sid, to, pid: None, started: Instant::now(), resume: false });
             return self.switch_check();
         };
@@ -925,16 +940,24 @@ impl App {
         self.switch_check()
     }
 
+    /// A running Claude process that has this session open: the tab's own,
+    /// or one Claude itself lists in `<config>/sessions/`.
+    fn running_claude(&mut self, sid: &str, account: u64) -> Option<u32> {
+        let claimed = self.config_of(account).map(|c| codemux_core::accounts::claimed_by(&c, sid)).unwrap_or_default();
+        claimed.into_iter().find(|pid| self.scanner.is_running(*pid))
+    }
+
     fn switch_check(&mut self) -> Task<Message> {
         let Some(p) = &self.pending_switch else { return Task::none() };
-        if let Some(pid) = p.pid {
-            if self.scanner.is_running(pid) {
-                if p.started.elapsed() > SWITCH_TIMEOUT {
-                    self.pending_switch = None;
-                    self.error = Some("Claude did not stop, so the session was not moved.".into());
-                }
-                return Task::none();
+        let (sid, tab_pid, started) = (p.sid.clone(), p.pid, p.started);
+        let from = self.index.get(&sid).map_or(0, |m| m.account);
+        let tab_running = tab_pid.is_some_and(|pid| self.scanner.is_running(pid));
+        if tab_running || self.running_claude(&sid, from).is_some() {
+            if started.elapsed() > SWITCH_TIMEOUT {
+                self.pending_switch = None;
+                self.error = Some("Claude still runs this session, so it was not moved.".into());
             }
+            return Task::none();
         }
         let p = self.pending_switch.take().expect("checked above");
         let moved = (|| {
@@ -2134,16 +2157,12 @@ mod tests {
     fn switch_account_stops_an_idle_tab_before_moving() {
         let (dir, mut app) = fixture();
         let pro = add_pro(&mut app, dir.path());
-        let _ = app.update(Message::NewTerminal);
-        let pid = app.tabs[0].term.child_pid().expect("no process");
-        app.tabs[0].kind = TabKind::Claude;
-        app.tabs[0].session_id = Some("s1".into());
-        app.tabs[0].busy = Some(false);
+        // Like Claude: takes a moment to exit after SIGHUP.
+        let pid = fake_claude_tab(&mut app, dir.path(), "trap 'sleep 0.5; exit 0' HUP; while :; do sleep 0.05; done");
 
         let _ = app.update(Message::SwitchAccount("s1".into(), pro));
-        assert!(app.tabs.is_empty(), "tab not closed");
-        // Resuming would start the real `claude`; only the move is tested here.
-        app.pending_switch.as_mut().expect("switch not pending").resume = false;
+        assert!(app.tabs.is_empty(), "tab not closed: {:?}", app.error);
+        assert!(app.pending_switch.is_some(), "moved before the process exited");
         let start = Instant::now();
         while app.pending_switch.is_some() && start.elapsed() < SWITCH_TIMEOUT {
             std::thread::sleep(SWITCH_POLL);
@@ -2151,8 +2170,76 @@ mod tests {
         }
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(!app.scanner.is_running(pid), "moved while the process still ran");
+        let pro_dir = dir.path().join(".claude-pro");
+        assert!(s1_in(&pro_dir).exists());
+        // Resumed with the new account.
+        assert_eq!(app.resumed.len(), 1, "not resumed");
+        assert_eq!(app.resumed[0].env[launch::CONFIG_ENV], pro_dir.display().to_string());
+        assert!(app.resumed[0].args.last().unwrap().contains("--resume s1"));
+    }
+
+    /// A tab that runs `script` as if it were Claude, idle, with session s1.
+    fn fake_claude_tab(app: &mut App, cwd: &std::path::Path, script: &str) -> u32 {
+        let spec = LaunchSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            env: Default::default(),
+            cwd: cwd.to_path_buf(),
+        };
+        let _ = app.spawn(TabKind::Claude, spec, Some("s1".into()), 0);
+        let tab = app.tabs.last_mut().unwrap();
+        tab.busy = Some(false);
+        let pid = tab.term.child_pid().expect("no process");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(app.scanner.is_running(pid), "process not seen");
+        pid
+    }
+
+    /// Claude keeps redrawing its screen while idle. After its tab closes,
+    /// nobody reads that output any more; the stop must still reach it.
+    #[cfg(unix)]
+    #[test]
+    fn switch_account_stops_a_tab_that_keeps_printing() {
+        let (dir, mut app) = fixture();
+        let pro = add_pro(&mut app, dir.path());
+        // Like Claude: redraws while idle, and writes a lot when it gets SIGHUP.
+        let script = "trap 'yes goodbye | head -c 400000; exit 0' HUP; while :; do echo redraw; sleep 0.001; done";
+        let pid = fake_claude_tab(&mut app, dir.path(), script);
+        // Let the output pile up, like a tab nobody looks at.
+        std::thread::sleep(Duration::from_secs(1));
+
+        let _ = app.update(Message::SwitchAccount("s1".into(), pro));
+        let start = Instant::now();
+        while app.pending_switch.is_some() && start.elapsed() < SWITCH_TIMEOUT + SWITCH_POLL * 2 {
+            std::thread::sleep(SWITCH_POLL);
+            let _ = app.update(Message::SwitchCheck);
+        }
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(!app.scanner.is_running(pid), "process still runs");
         assert!(s1_in(&dir.path().join(".claude-pro")).exists());
-        assert_eq!(app.selected, Selected::Session("s1".into()));
+    }
+
+    /// Claude started outside the app (or a tab already closed) can still
+    /// run the session. Its files must not move under it.
+    #[test]
+    fn switch_account_refuses_while_claude_runs_elsewhere() {
+        let (dir, mut app) = fixture();
+        let pro = add_pro(&mut app, dir.path());
+        let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        std::fs::write(dir.path().join(format!("sessions/{}.json", other.id())), format!(r#"{{"pid":{},"sessionId":"s1"}}"#, other.id())).unwrap();
+
+        let _ = app.update(Message::SwitchAccount("s1".into(), pro));
+        assert!(app.error.as_deref().unwrap_or_default().contains("still runs"), "{:?}", app.error);
+        assert!(s1_in(dir.path()).exists(), "moved while Claude runs");
+        assert!(app.pending_switch.is_none());
+
+        // Claude exits (its file stays, as after a crash): the move works.
+        other.kill().unwrap();
+        other.wait().unwrap();
+        let _ = app.update(Message::SwitchAccount("s1".into(), pro));
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(s1_in(&dir.path().join(".claude-pro")).exists());
     }
 
     /// Delete works for a session of another account too.

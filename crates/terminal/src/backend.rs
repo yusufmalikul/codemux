@@ -149,6 +149,8 @@ pub struct Backend {
     last_content: RenderableContent,
     pub(crate) url_regex: RegexSearch,
     child_pid: Option<u32>,
+    /// True once the PTY thread has ended. It ends when the program exits.
+    loop_done: Option<Box<dyn Fn() -> bool + Send>>,
     /// URI of a hovered OSC 8 hyperlink (its shown text is not the URL).
     hovered_uri: Option<String>,
     /// Colors used to answer color queries (OSC 4/10/11/12).
@@ -205,7 +207,8 @@ impl Backend {
 
         let notifier = Notifier(pty_event_loop.channel());
 
-        let _ = pty_event_loop.spawn();
+        let event_loop = pty_event_loop.spawn();
+        let loop_done: Box<dyn Fn() -> bool + Send> = Box::new(move || event_loop.is_finished());
 
         Ok(Self {
             term: term.clone(),
@@ -214,6 +217,7 @@ impl Backend {
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
             child_pid,
+            loop_done: Some(loop_done),
             hovered_uri: None,
             theme: Theme::default(),
             open_url: open_in_default_app,
@@ -773,7 +777,44 @@ impl Default for RenderableContent {
     }
 }
 
+/// How long a program gets to exit after SIGHUP before it is killed.
+#[cfg(unix)]
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl Drop for Backend {
+    /// Stop the program. alacritty's own way (Shutdown) stops reading the
+    /// PTY, then sends SIGHUP and waits for the program. A program that
+    /// writes on SIGHUP (Claude Code does) then blocks on the full PTY and
+    /// never exits. So send SIGHUP first and let the PTY thread keep reading:
+    /// it ends by itself when the program exits.
+    #[cfg(unix)]
+    fn drop(&mut self) {
+        let (Some(pid), Some(loop_done)) = (self.child_pid, self.loop_done.take()) else {
+            let _ = self.notifier.0.send(Msg::Shutdown);
+            return;
+        };
+        // SAFETY: plain signal to our own child. Its PID cannot be reused
+        // yet: the child is only reaped when the PTY thread ends.
+        unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+        let notifier = self.notifier.0.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while start.elapsed() < STOP_GRACE {
+                if loop_done() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if !loop_done() {
+                // SAFETY: as above; the thread still runs, so the child is
+                // not reaped and the PID is still ours.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+            let _ = notifier.send(Msg::Shutdown);
+        });
+    }
+
+    #[cfg(not(unix))]
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
     }

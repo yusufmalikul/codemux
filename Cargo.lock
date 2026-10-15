@@ -626,6 +626,7 @@ dependencies = [
  "iced",
  "iced_core",
  "iced_graphics",
+ "libc",
  "open",
  "tempfile",
  "tokio",

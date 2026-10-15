@@ -86,6 +86,20 @@ pub fn move_session(from_config: &Path, to_config: &Path, jsonl: &Path, backup_r
     Ok(to_config.join(&rel[0]))
 }
 
+/// PIDs that Claude Code says are running this session. Claude writes
+/// `<config>/sessions/<pid>.json` with the session ID while it runs. A file
+/// can outlive a crash, so the caller must check that the PID still runs.
+pub fn claimed_by(config: &Path, sid: &str) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir(config.join("sessions")) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let v: serde_json::Value = serde_json::from_slice(&fs::read(e.path()).ok()?).ok()?;
+            (v.get("sessionId")?.as_str()? == sid).then(|| v.get("pid")?.as_u64()).flatten().map(|p| p as u32)
+        })
+        .collect()
+}
+
 /// Remove backups older than `max_age`. Each move makes one folder.
 pub fn prune_backups(backup_root: &Path, max_age: Duration) {
     let Ok(entries) = fs::read_dir(backup_root) else { return };
@@ -265,6 +279,18 @@ mod tests {
         assert!(jsonl(&s.a).exists());
         assert!(s.a.join(format!("file-history/{ID}/abc@v1")).exists());
         assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn claimed_by_reads_claude_session_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("101.json"), format!(r#"{{"pid":101,"sessionId":"{ID}","cwd":"/x"}}"#)).unwrap();
+        fs::write(dir.join("102.json"), r#"{"pid":102,"sessionId":"other"}"#).unwrap();
+        fs::write(dir.join("broken.json"), "{").unwrap();
+        assert_eq!(claimed_by(tmp.path(), ID), vec![101]);
+        assert!(claimed_by(&tmp.path().join("missing"), ID).is_empty());
     }
 
     #[test]

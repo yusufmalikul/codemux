@@ -193,6 +193,68 @@ fn coalesce_wakeups(batch: Vec<AlacrittyEvent>) -> Vec<AlacrittyEvent> {
 mod tests {
     use super::*;
 
+    fn running(pid: u32) -> bool {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| {
+                let stat = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !stat.is_empty() && !stat.starts_with('Z')
+            })
+            .unwrap_or(false)
+    }
+
+    /// Claude writes to the terminal when it gets SIGHUP. After the tab is
+    /// closed nobody reads that output, so the program blocked on the write
+    /// and never exited (a stuck `claude` per closed tab).
+    #[cfg(unix)]
+    #[test]
+    fn closing_stops_a_program_that_prints_on_hangup() {
+        let script = "trap 'yes goodbye | head -c 400000; exit 0' HUP; \
+                      while :; do sleep 0.05; done";
+        let settings = Settings {
+            backend: crate::settings::BackendSettings {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let term = Terminal::new(1, settings).unwrap();
+        let pid = term.child_pid().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(running(pid));
+        drop(term);
+        let start = std::time::Instant::now();
+        while running(pid) && start.elapsed() < std::time::Duration::from_secs(8) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!running(pid), "program still runs after the terminal closed");
+    }
+
+    /// A program that ignores SIGHUP is stopped too, a little later.
+    #[cfg(unix)]
+    #[test]
+    fn closing_stops_a_program_that_ignores_hangup() {
+        let settings = Settings {
+            backend: crate::settings::BackendSettings {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "trap '' HUP; while :; do sleep 0.05; done".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let term = Terminal::new(2, settings).unwrap();
+        let pid = term.child_pid().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(term);
+        let start = std::time::Instant::now();
+        while running(pid) && start.elapsed() < std::time::Duration::from_secs(8) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!running(pid), "program still runs after the terminal closed");
+    }
+
     #[test]
     fn coalesce_keeps_one_wakeup_and_all_other_events() {
         let out = coalesce_wakeups(vec![
