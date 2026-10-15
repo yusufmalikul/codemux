@@ -29,6 +29,10 @@ const ACCENT: iced::Color = iced::Color::from_rgb8(0x35, 0x3d, 0xb0);
 const DEFAULT_WORKSPACE: &str = "Default";
 /// Left indent of rows inside a workspace, so the sidebar reads as a tree.
 const TREE_INDENT: f32 = 16.0;
+/// Text size of sidebar rows. The session detail view uses it too, so both read the same.
+const TEXT_SIZE: u32 = 16;
+/// Smaller text for labels and secondary info.
+const SMALL_TEXT_SIZE: u32 = 14;
 const WORKSPACE_INPUT: &str = "new-workspace-name";
 const RENAME_INPUT: &str = "rename-session";
 /// iced ships only Fira Sans Regular, so bold text fell back to another
@@ -1031,30 +1035,30 @@ impl App {
             Selected::Session(sid) => match self.index.get(sid) {
                 Some(m) => {
                     let mut col = column![
-                        self.title_or_rename(&m.id, self.session_title(m), 20, 13),
-                        text(m.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default()).size(12),
+                        self.title_or_rename(&m.id, self.session_title(m), 22, SMALL_TEXT_SIZE),
+                        text(m.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default()).size(TEXT_SIZE),
                     ]
                     .spacing(8);
                     if let Some(b) = &m.git_branch {
-                        col = col.push(text(format!("Branch: {b}")).size(12));
+                        col = col.push(text(format!("Branch: {b}")).size(TEXT_SIZE));
                     }
-                    col = col.push(text(format!("Last active: {}", relative_time(m.sort_time()))).size(12));
-                    col = col.push(text(format!("ID: {}", m.id)).size(11));
+                    col = col.push(text(format!("Last active: {}", relative_time(m.sort_time()))).size(TEXT_SIZE));
+                    col = col.push(text(format!("ID: {}", m.id)).size(SMALL_TEXT_SIZE));
                     let choices = self.workspace_choices();
                     let current = self.workspace_of(&m.id);
                     let selected = choices.iter().find(|c| c.id == current).cloned();
                     let sid = m.id.clone();
                     col = col.push(
                         row![
-                            text("Workspace:").size(12),
-                            pick_list(choices, selected, move |c| Message::MoveSession(sid.clone(), c.id)).text_size(13),
+                            text("Workspace:").size(TEXT_SIZE),
+                            pick_list(choices, selected, move |c| Message::MoveSession(sid.clone(), c.id)).text_size(TEXT_SIZE),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                     );
                     let actions: Element<'_, Message> = if self.confirm_delete.as_deref() == Some(m.id.as_str()) {
                         row![
-                            text("Delete this session file? This cannot be undone.").size(12),
+                            text("Delete this session file? This cannot be undone.").size(TEXT_SIZE),
                             button(text("Delete permanently")).on_press(Message::DeleteConfirm(m.id.clone())).style(button::danger),
                             button(text("Cancel")).on_press(Message::DeleteCancel).style(button::secondary),
                         ]
@@ -1071,7 +1075,7 @@ impl App {
                     };
                     col = col.push(actions);
                     if !m.recent_messages.is_empty() {
-                        let mut prompts = column![text("Recent conversation").size(14)].spacing(8);
+                        let mut prompts = column![text("Recent conversation").size(18)].spacing(8);
                         // Oldest first, newest at the bottom, like Claude Code.
                         for msg in &m.recent_messages {
                             let (who, style): (&str, fn(&iced::Theme) -> container::Style) = match msg.role {
@@ -1079,7 +1083,7 @@ impl App {
                                 Role::Assistant => ("Claude", container::bordered_box),
                             };
                             prompts = prompts.push(
-                                container(column![text(who).size(11), text(msg.text.clone()).size(12)].spacing(4))
+                                container(column![text(who).size(SMALL_TEXT_SIZE), text(msg.text.clone()).size(TEXT_SIZE)].spacing(4))
                                     .padding(8)
                                     .width(Length::Fill)
                                     .style(style),
@@ -1087,7 +1091,7 @@ impl App {
                         }
                         col = col.push(rule::horizontal(1)).push(prompts);
                     } else if let Some(p) = &m.last_prompt {
-                        col = col.push(text(format!("Last prompt: {p}")).size(12));
+                        col = col.push(text(format!("Last prompt: {p}")).size(TEXT_SIZE));
                     }
                     container(scrollable(col.padding(24)).height(Length::Fill)).into()
                 }
@@ -1244,7 +1248,7 @@ fn open_tab_style(theme: &iced::Theme, status: button::Status, selected: bool) -
 /// Sidebar label: only the session name, bold for a session open in a tab.
 /// Details (folder, branch, time) show in the main area when selected.
 fn row_label(title: String, bold: bool) -> Element<'static, Message> {
-    text(title).size(16).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
+    text(title).size(TEXT_SIZE).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
