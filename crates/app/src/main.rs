@@ -997,12 +997,7 @@ impl App {
 
     fn session_row(&self, m: &SessionMeta) -> Element<'static, Message> {
         let selected = self.selected == Selected::Session(m.id.clone());
-        let mut sub = vec![m.folder_name()];
-        if let Some(b) = &m.git_branch {
-            sub.push(b.clone());
-        }
-        sub.push(relative_time(m.sort_time()));
-        button(row_label(self.session_title(m), format!("   {}", sub.join(" · ")), false))
+        button(row_label(self.session_title(m), false))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -1185,7 +1180,7 @@ struct TabRow {
 fn tab_row(t: &TabRow) -> Element<'static, Message> {
     let label = row![
         text("●").size(12).color(status_color(t.status)),
-        row_label(t.title.clone(), format!("   {} · {}", t.folder, t.status), true),
+        row_label(t.title.clone(), true),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
@@ -1230,16 +1225,10 @@ fn open_tab_style(theme: &iced::Theme, status: button::Status, selected: bool) -
     button::Style { background: Some(color.into()), border: iced::border::rounded(4), ..base }
 }
 
-/// Two-line sidebar label. The name is larger so it is easy to scan, and
-/// bold for a session open in a tab; the details line is smaller so it does
-/// not compete with it.
-fn row_label(title: String, details: String, bold: bool) -> Element<'static, Message> {
-    column![
-        text(title).size(16).font(if bold { BOLD } else { iced::Font::DEFAULT }),
-        text(details).size(12),
-    ]
-    .spacing(2)
-    .into()
+/// Sidebar label: only the session name, bold for a session open in a tab.
+/// Details (folder, branch, time) show in the main area when selected.
+fn row_label(title: String, bold: bool) -> Element<'static, Message> {
+    text(title).size(16).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
@@ -1515,11 +1504,11 @@ mod tests {
         }
         app.tabs[0].session_id = Some("s1".into());
         app.adopt_tab_sessions();
-        let tab = app.tabs[0].id;
-        // The title also shows above the terminal, so look for the details
-        // line, which only the sidebar row has.
-        let row = format!("   {} · shell", folder_label(&app.tabs[0].cwd));
-        let row = row.as_str();
+        // The title also shows above the terminal, so show nothing there:
+        // then the title can only come from the sidebar row.
+        app.selected = Selected::None;
+        let (title, _) = app.tab_title(&app.tabs[0]);
+        let row = title.as_str();
 
         assert!(!found_after_frames(&mut app, vec![], "ACTIVE"), "separate ACTIVE list still shown");
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"), "open badge missing");
@@ -1530,8 +1519,8 @@ mod tests {
         assert!(!found_after_frames(&mut app, msgs, row), "not collapsed");
         assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"));
 
-        assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], row), "not opened on select");
-        assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"));
+        let tab = app.tabs[0].id;
+        assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], "▾ Backend  (1)  ● 1 open"), "not opened on select");
     }
 
     /// A new terminal opens in the workspace the user is looking at, and the
@@ -1549,10 +1538,12 @@ mod tests {
         ] {
             let _ = app.update(m);
         }
-        let row = format!("   {} · shell", folder_label(&app.tabs[0].cwd));
+        let shown = std::mem::replace(&mut app.selected, Selected::None);
+        let (row, _) = app.tab_title(&app.tabs[0]);
         assert!(found_after_frames(&mut app, vec![], "▾ Backend  (2)  ● 1 open"), "terminal not in Backend");
         assert!(found_after_frames(&mut app, vec![], &row), "tab row hidden");
         assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+        app.selected = shown;
 
         // A second terminal opened from that tab stays in Backend too.
         let _ = app.update(Message::NewTerminal);
@@ -1578,15 +1569,16 @@ mod tests {
         let _ = app.update(Message::NewTerminal);
         app.tabs[0].kind = TabKind::Claude;
         let id = app.tabs[0].id;
-        let folder = folder_label(&app.tabs[0].cwd);
         let event = |e| Message::Terminal(term::Event::BackendCall(id, term::BackendCommand::ProcessAlacrittyEvent(e)));
 
         let idle = vec![event(term::AlacrittyEvent::Title("✳ Fix webhook".into())), event(term::AlacrittyEvent::Wakeup)];
-        assert!(found_after_frames(&mut app, idle, &format!("   {folder} · waiting")), "idle redraw shown as working");
+        found_after_frames(&mut app, idle, "");
+        assert_eq!(app.tab_status(&app.tabs[0]), "waiting", "idle redraw shown as working");
 
         let busy = vec![event(term::AlacrittyEvent::Title("◐ Fix webhook".into()))];
         app.tabs[0].last_output = Instant::now() - BUSY_WINDOW * 5;
-        assert!(found_after_frames(&mut app, busy, &format!("   {folder} · working")), "spinner title not shown as working");
+        found_after_frames(&mut app, busy, "");
+        assert_eq!(app.tab_status(&app.tabs[0]), "working", "spinner title not shown as working");
     }
 
     /// The ✕ on a workspace only asks first. Cancel keeps it; Delete removes it.
