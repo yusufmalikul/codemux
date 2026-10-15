@@ -1072,8 +1072,8 @@ impl App {
                     col = col.push(actions);
                     if !m.recent_prompts.is_empty() {
                         let mut prompts = column![text("Recent prompts").size(14)].spacing(8);
-                        // Newest first.
-                        for p in m.recent_prompts.iter().rev() {
+                        // Oldest first, newest at the bottom, like Claude Code.
+                        for p in &m.recent_prompts {
                             prompts = prompts.push(
                                 container(text(p.clone()).size(12))
                                     .padding(8)
