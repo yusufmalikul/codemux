@@ -1039,9 +1039,6 @@ impl App {
                         col = col.push(text(format!("Branch: {b}")).size(12));
                     }
                     col = col.push(text(format!("Last active: {}", relative_time(m.sort_time()))).size(12));
-                    if let Some(p) = &m.last_prompt {
-                        col = col.push(text(format!("Last prompt: {p}")).size(12));
-                    }
                     col = col.push(text(format!("ID: {}", m.id)).size(11));
                     let choices = self.workspace_choices();
                     let current = self.workspace_of(&m.id);
@@ -1073,7 +1070,22 @@ impl App {
                         .into()
                     };
                     col = col.push(actions);
-                    container(col).padding(24).into()
+                    if !m.recent_prompts.is_empty() {
+                        let mut prompts = column![text("Recent prompts").size(14)].spacing(8);
+                        // Newest first.
+                        for p in m.recent_prompts.iter().rev() {
+                            prompts = prompts.push(
+                                container(text(p.clone()).size(12))
+                                    .padding(8)
+                                    .width(Length::Fill)
+                                    .style(container::rounded_box),
+                            );
+                        }
+                        col = col.push(rule::horizontal(1)).push(prompts);
+                    } else if let Some(p) = &m.last_prompt {
+                        col = col.push(text(format!("Last prompt: {p}")).size(12));
+                    }
+                    container(scrollable(col.padding(24)).height(Length::Fill)).into()
                 }
                 None => empty_state(),
             },

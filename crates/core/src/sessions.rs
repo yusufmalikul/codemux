@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const TITLE_MAX: usize = 80;
+/// How many recent prompts each session keeps for the detail view.
+pub const RECENT_PROMPTS: usize = 5;
+/// Longest stored recent prompt, in characters. Pastes can be huge.
+const RECENT_PROMPT_MAX: usize = 600;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionMeta {
@@ -22,6 +26,8 @@ pub struct SessionMeta {
     pub agent_name: Option<String>,
     pub first_prompt: Option<String>,
     pub last_prompt: Option<String>,
+    /// Last few real typed prompts, oldest first (at most `RECENT_PROMPTS`).
+    pub recent_prompts: Vec<String>,
     pub last_activity: Option<DateTime<Utc>>,
     /// File modified time. Used when no timestamp is found.
     pub modified: Option<SystemTime>,
@@ -86,6 +92,19 @@ fn user_text(message: &Value) -> Option<String> {
     Some(text.to_string())
 }
 
+fn push_recent(list: &mut Vec<String>, text: String) {
+    let text = if text.chars().count() > RECENT_PROMPT_MAX {
+        let cut: String = text.chars().take(RECENT_PROMPT_MAX).collect();
+        format!("{cut}…")
+    } else {
+        text
+    };
+    list.push(text);
+    if list.len() > RECENT_PROMPTS {
+        list.remove(0);
+    }
+}
+
 /// Apply one JSON line to the session meta.
 fn apply_line(meta: &mut SessionMeta, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
@@ -119,8 +138,13 @@ fn apply_line(meta: &mut SessionMeta, line: &str) {
             }
             let is_meta = v.get("isMeta").and_then(Value::as_bool).unwrap_or(false);
             let is_side = v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false);
-            if kind == "user" && !is_meta && !is_side && meta.first_prompt.is_none() {
-                meta.first_prompt = v.get("message").and_then(user_text);
+            if kind == "user" && !is_meta && !is_side {
+                if let Some(t) = v.get("message").and_then(user_text) {
+                    if meta.first_prompt.is_none() {
+                        meta.first_prompt = Some(t.clone());
+                    }
+                    push_recent(&mut meta.recent_prompts, t);
+                }
             }
         }
         _ => {}
@@ -336,6 +360,27 @@ not json at all
         assert_eq!(m.last_prompt.as_deref(), Some("and add a test"));
         assert_eq!(m.title(), "fix the webhook retry");
         assert_eq!(m.folder_name(), "proj");
+    }
+
+    #[test]
+    fn keeps_last_five_prompts_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut body = String::from(FIXTURE);
+        for i in 1..=6 {
+            body.push_str(&format!(
+                r#"{{"type":"user","cwd":"/tmp/proj","isSidechain":false,"message":{{"role":"user","content":"prompt {i}"}}}}"#
+            ));
+            body.push('\n');
+        }
+        body.push_str(r#"{"type":"user","cwd":"/tmp/proj","isMeta":true,"message":{"role":"user","content":"meta text"}}"#);
+        body.push('\n');
+        let f = write_fixture(dir.path(), &body);
+        let m = parse_file(&f).unwrap();
+        assert_eq!(m.recent_prompts, ["prompt 2", "prompt 3", "prompt 4", "prompt 5", "prompt 6"]);
+        assert_eq!(m.first_prompt.as_deref(), Some("fix the   webhook retry"));
+
+        let short = parse_file(&write_fixture(dir.path(), FIXTURE)).unwrap();
+        assert_eq!(short.recent_prompts, ["fix the   webhook retry"]);
     }
 
     #[test]
