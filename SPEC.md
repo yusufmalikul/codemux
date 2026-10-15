@@ -323,7 +323,16 @@ Use case: one account hits its usage limit, and the user continues the same sess
      `file-history/<id>/`. First everything is copied under a temporary name (an error here changes nothing), then
      put in place, then the originals move to `<app data>/moved-sessions/`, kept for 14 days.
    - The session resumes with the new account. Switching back later moves the newest files back the same way.
-6. A session should be in one account only. If the same ID is found in two (a copy made by hand), the most recently
+6. **Shared config.** An extra account's folder has symlinks to the default account's `settings.json`,
+   `keybindings.json`, `skills/`, `agents/`, `commands/`, `rules/`, `output-styles/` and `plugins/`, so they are
+   the same on every account. The links are made when the account is added, and made again (for anything new)
+   before each launch and when the Accounts page opens. A missing shared folder is made in the default config first;
+   a missing shared file is skipped. An entry the account already has (a real file or folder, or a link to somewhere
+   else) is never changed, and the Accounts page lists it as "own copy". Logins, `.claude.json` and sessions stay
+   per account. `CLAUDE.md` is not linked: Claude Code ignores a user `CLAUDE.md` that is a symlink or a hard link
+   (v2.1.300). Synced claude.ai skills and plugins live under a per-account ID in `skills/synced/` and
+   `plugins/synced/`, so sharing these folders does not mix them.
+7. A session should be in one account only. If the same ID is found in two (a copy made by hand), the most recently
    changed file is used.
 
 ## 12. Terminal widget (`crates/terminal`)

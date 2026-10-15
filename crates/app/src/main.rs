@@ -13,7 +13,7 @@ use codemux_core::store::{Account, AppState, Workspace};
 use codemux_terminal as term;
 use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -168,6 +168,9 @@ struct App {
     default_config: Option<PathBuf>,
     /// Extra accounts (saved in state.json).
     accounts: Vec<Account>,
+    /// Shared config entries each extra account keeps its own copy of
+    /// (see codemux_core::accounts::share_config). Shown on the Accounts page.
+    unshared: HashMap<u64, Vec<&'static str>>,
     /// Name typed for a new account. Some while the name box is shown.
     new_account: Option<String>,
     pending_switch: Option<PendingSwitch>,
@@ -322,6 +325,7 @@ impl App {
             index_version: 0,
             default_config,
             accounts: state.accounts,
+            unshared: HashMap::new(),
             new_account: None,
             pending_switch: None,
             backup_dir,
@@ -366,9 +370,19 @@ impl App {
     }
 
     /// `CLAUDE_CONFIG_DIR` for an account. The default account leaves it
-    /// unset (see launch::claude).
-    fn launch_config(&self, account: u64) -> Option<PathBuf> {
+    /// unset (see launch::claude). Shared config links are made or repaired
+    /// first, so a skill or setting added since the last launch is there.
+    fn launch_config(&mut self, account: u64) -> Option<PathBuf> {
+        self.share_config(account);
         (account != 0).then(|| self.config_of(account)).flatten()
+    }
+
+    /// Link the default account's settings, skills and other shared config
+    /// into an extra account's folder (spec 11.7).
+    fn share_config(&mut self, account: u64) {
+        let (Some(shared), Some(dir)) = (self.config_of(0), self.config_of(account).filter(|_| account != 0)) else { return };
+        let unshared = codemux_core::accounts::share_config(&shared, &dir);
+        self.unshared.insert(account, unshared);
     }
 
     fn roots(&self) -> Vec<Root> {
@@ -748,6 +762,9 @@ impl App {
             Message::ShowAccounts => {
                 self.confirm_delete = None;
                 self.selected = Selected::Accounts;
+                for id in self.accounts.iter().map(|a| a.id).collect::<Vec<_>>() {
+                    self.share_config(id);
+                }
             }
             Message::NewAccountStart => {
                 self.new_account = Some(String::new());
@@ -880,12 +897,14 @@ impl App {
         std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
         let id = self.accounts.iter().map(|a| a.id).max().unwrap_or(0) + 1;
         self.accounts.push(Account { id, name, config_dir: dir });
+        self.share_config(id);
         self.error = None;
         self.accounts_changed();
         Ok(Some(id))
     }
 
     fn login(&mut self, id: u64) -> Task<Message> {
+        self.share_config(id);
         let Some(dir) = self.config_of(id).filter(|_| id != 0) else { return Task::none() };
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
         self.spawn(TabKind::Shell, launch::login(&dir, home), None, id)
@@ -1427,6 +1446,8 @@ impl App {
         let mut col = column![
             text("Accounts").size(22),
             text("Each account is its own Claude Code config folder, with its own login and sessions. \
+                  Settings, skills, agents, commands, rules, output styles and plugins are links to the \
+                  Default account's, so they are the same everywhere. \
                   To continue a session with another account, pick the account in the session's view.")
                 .size(TEXT_SIZE),
             container(column![text(DEFAULT_ACCOUNT).size(TEXT_SIZE), folder(self.config_of(0))].spacing(2))
@@ -1439,7 +1460,12 @@ impl App {
             col = col.push(
                 container(
                     row![
-                        column![text(a.name.clone()).size(TEXT_SIZE), folder(Some(a.config_dir.clone()))].spacing(2).width(Length::Fill),
+                        column![text(a.name.clone()).size(TEXT_SIZE), folder(Some(a.config_dir.clone()))]
+                            .push(self.unshared.get(&a.id).filter(|u| !u.is_empty()).map(|u| {
+                                text(format!("Own copy, not shared with Default: {}", u.join(", "))).size(SMALL_TEXT_SIZE)
+                            }))
+                            .spacing(2)
+                            .width(Length::Fill),
                         button(text("Log in").size(SMALL_TEXT_SIZE)).on_press(Message::AccountLogin(a.id)).style(button::secondary),
                         button(text("Remove").size(SMALL_TEXT_SIZE)).on_press(Message::RemoveAccount(a.id)).style(button::danger),
                     ]
@@ -2104,6 +2130,32 @@ mod tests {
         let _ = again.update(Message::RemoveAccount(id));
         assert!(again.accounts.is_empty());
         assert!(dir.path().join(".claude-pro").is_dir(), "remove must not delete the folder");
+    }
+
+    /// An extra account links the Default account's settings and skills. Its
+    /// own copies are kept and shown on the Accounts page, and a launch
+    /// repairs a missing link.
+    #[cfg(unix)]
+    #[test]
+    fn accounts_share_the_default_config() {
+        let (dir, mut app) = fixture();
+        std::fs::write(dir.path().join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude-work")).unwrap();
+        std::fs::write(dir.path().join(".claude-work/settings.json"), "own").unwrap();
+
+        let pro = add_pro(&mut app, dir.path());
+        let pro_dir = dir.path().join(".claude-pro");
+        assert_eq!(std::fs::read_link(pro_dir.join("settings.json")).unwrap(), dir.path().join("settings.json"));
+        assert_eq!(std::fs::read_link(pro_dir.join("skills")).unwrap(), dir.path().join("skills"));
+        assert!(!pro_dir.join("projects").exists(), "sessions must stay per account");
+
+        app.add_account("Work").unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join(".claude-work/settings.json")).unwrap(), "own");
+        assert!(found_after_frames(&mut app, vec![Message::ShowAccounts], "Own copy, not shared with Default: settings.json"));
+
+        std::fs::remove_file(pro_dir.join("skills")).unwrap();
+        assert_eq!(app.launch_config(pro), Some(pro_dir.clone()));
+        assert!(pro_dir.join("skills").is_symlink(), "launch did not repair the link");
     }
 
     /// Default → Pro → Default for a session that is not running. The file

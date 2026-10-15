@@ -86,6 +86,73 @@ pub fn move_session(from_config: &Path, to_config: &Path, jsonl: &Path, backup_r
     Ok(to_config.join(&rel[0]))
 }
 
+/// Config folders shared by every account: each extra account gets a symlink
+/// to the default account's copy, so settings, skills, agents, commands,
+/// rules, output styles and plugins are the same everywhere. Logins,
+/// `.claude.json` and sessions stay per account. A missing folder is first
+/// made in the shared config, so an account never grows its own copy.
+/// Plugins and skills that claude.ai syncs live under a per-account ID in
+/// `plugins/synced/` and `skills/synced/`, so sharing these folders is safe.
+pub const SHARED_DIRS: &[&str] = &["skills", "agents", "commands", "rules", "output-styles", "plugins"];
+
+/// Config files shared like [`SHARED_DIRS`]. A file the shared config does not
+/// have is skipped. `CLAUDE.md` is not here: Claude Code ignores a user
+/// `CLAUDE.md` that is a symlink or a hard link (checked in v2.1.300).
+pub const SHARED_FILES: &[&str] = &["settings.json", "keybindings.json"];
+
+/// Link the shared config entries of `shared` into the account folder
+/// `account` (spec 11.7). An entry the account already has (a real file or
+/// folder, or a link to somewhere else) is never changed: it may be the
+/// user's own setup. Returns the names that are not shared because of that,
+/// or because the link failed.
+pub fn share_config(shared: &Path, account: &Path) -> Vec<&'static str> {
+    if !shared.is_dir() || same_dir(shared, account) {
+        return Vec::new();
+    }
+    let dirs = SHARED_DIRS.iter().map(|n| (*n, true));
+    let files = SHARED_FILES.iter().map(|n| (*n, false));
+    let mut unshared = Vec::new();
+    for (name, is_dir) in dirs.chain(files) {
+        let (target, link) = (shared.join(name), account.join(name));
+        match fs::symlink_metadata(&link) {
+            Ok(m) if m.file_type().is_symlink() && fs::read_link(&link).is_ok_and(|t| t == target) => continue,
+            Ok(_) => {
+                unshared.push(name);
+                continue;
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(_) => {
+                unshared.push(name);
+                continue;
+            }
+        }
+        let ready = if is_dir { fs::create_dir_all(&target).is_ok() } else { target.is_file() };
+        if !ready {
+            continue;
+        }
+        if fs::create_dir_all(account).and_then(|_| symlink(&target, &link, is_dir)).is_err() {
+            unshared.push(name);
+        }
+    }
+    unshared
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path, _is_dir: bool) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Windows may need Developer Mode for this; a failure leaves the entry
+/// unshared and the account still works.
+#[cfg(windows)]
+fn symlink(target: &Path, link: &Path, is_dir: bool) -> io::Result<()> {
+    if is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
 /// PIDs that Claude Code says are running this session. Claude writes
 /// `<config>/sessions/<pid>.json` with the session ID while it runs. A file
 /// can outlive a crash, so the caller must check that the PID still runs.
@@ -279,6 +346,67 @@ mod tests {
         assert!(jsonl(&s.a).exists());
         assert!(s.a.join(format!("file-history/{ID}/abc@v1")).exists());
         assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    /// Shared entries become links to the default config. A folder the default
+    /// config lacks is made there first; a missing file is skipped.
+    #[cfg(unix)]
+    #[test]
+    fn share_config_links_shared_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (shared, account) = (tmp.path().join("claude"), tmp.path().join("claude-pro"));
+        fs::create_dir_all(shared.join("skills/my-skill")).unwrap();
+        fs::write(shared.join("settings.json"), "{}").unwrap();
+        fs::write(shared.join("CLAUDE.md"), "rules").unwrap();
+
+        assert!(share_config(&shared, &account).is_empty());
+        for name in SHARED_DIRS.iter().chain(&["settings.json"]) {
+            assert_eq!(fs::read_link(account.join(name)).unwrap(), shared.join(name), "{name} not linked");
+        }
+        assert!(shared.join("agents").is_dir(), "missing shared folder not made");
+        assert!(account.join("skills/my-skill").is_dir());
+        assert!(!account.join("keybindings.json").exists(), "link to a missing file");
+        assert!(!account.join("CLAUDE.md").exists(), "Claude Code ignores a linked CLAUDE.md");
+
+        // A write in the account lands in the shared config.
+        fs::write(account.join("settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(fs::read_to_string(shared.join("settings.json")).unwrap(), r#"{"theme":"dark"}"#);
+
+        // Running again changes nothing and picks up a file added later.
+        fs::write(shared.join("keybindings.json"), "{}").unwrap();
+        assert!(share_config(&shared, &account).is_empty());
+        assert_eq!(fs::read_link(account.join("keybindings.json")).unwrap(), shared.join("keybindings.json"));
+    }
+
+    /// The account's own entries, and links made by the user, are kept.
+    #[cfg(unix)]
+    #[test]
+    fn share_config_keeps_existing_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (shared, account) = (tmp.path().join("claude"), tmp.path().join("claude-pro"));
+        fs::create_dir_all(shared.join("skills")).unwrap();
+        fs::write(shared.join("settings.json"), "shared").unwrap();
+        fs::create_dir_all(account.join("skills/own")).unwrap();
+        fs::write(account.join("settings.json"), "own").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("dotfiles-agents"), account.join("agents")).unwrap();
+
+        let unshared = share_config(&shared, &account);
+        assert_eq!(unshared, vec!["skills", "agents", "settings.json"]);
+        assert_eq!(fs::read_to_string(account.join("settings.json")).unwrap(), "own");
+        assert!(account.join("skills/own").is_dir());
+        assert_eq!(fs::read_link(account.join("agents")).unwrap(), tmp.path().join("dotfiles-agents"));
+        assert_eq!(fs::read_link(account.join("commands")).unwrap(), shared.join("commands"));
+    }
+
+    #[test]
+    fn share_config_never_links_a_folder_to_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("skills")).unwrap();
+        assert!(share_config(tmp.path(), tmp.path()).is_empty());
+        assert!(tmp.path().join("skills").is_dir());
+        assert!(!fs::symlink_metadata(tmp.path().join("skills")).unwrap().file_type().is_symlink());
+        assert!(share_config(&tmp.path().join("missing"), &tmp.path().join("pro")).is_empty());
+        assert!(!tmp.path().join("pro").exists(), "made an account folder without a shared config");
     }
 
     #[test]
