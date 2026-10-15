@@ -151,6 +151,9 @@ pub struct Backend {
     child_pid: Option<u32>,
     /// True once the PTY thread has ended. It ends when the program exits.
     loop_done: Option<Box<dyn Fn() -> bool + Send>>,
+    /// How long the program gets to exit after SIGHUP before it is killed.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    stop_grace: std::time::Duration,
     /// URI of a hovered OSC 8 hyperlink (its shown text is not the URL).
     hovered_uri: Option<String>,
     /// Colors used to answer color queries (OSC 4/10/11/12).
@@ -169,6 +172,7 @@ impl Backend {
         pty_event_proxy_sender: mpsc::Sender<Event>,
         settings: BackendSettings,
     ) -> Result<Self> {
+        let stop_grace = settings.stop_grace;
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(settings.program, settings.args)),
             working_directory: settings.working_directory,
@@ -218,6 +222,7 @@ impl Backend {
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
             child_pid,
             loop_done: Some(loop_done),
+            stop_grace,
             hovered_uri: None,
             theme: Theme::default(),
             open_url: open_in_default_app,
@@ -777,10 +782,6 @@ impl Default for RenderableContent {
     }
 }
 
-/// How long a program gets to exit after SIGHUP before it is killed.
-#[cfg(unix)]
-const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
-
 impl Drop for Backend {
     /// Stop the program. alacritty's own way (Shutdown) stops reading the
     /// PTY, then sends SIGHUP and waits for the program. A program that
@@ -797,9 +798,10 @@ impl Drop for Backend {
         // yet: the child is only reaped when the PTY thread ends.
         unsafe { libc::kill(pid as i32, libc::SIGHUP) };
         let notifier = self.notifier.0.clone();
+        let grace = self.stop_grace;
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
-            while start.elapsed() < STOP_GRACE {
+            while start.elapsed() < grace {
                 if loop_done() {
                     return;
                 }

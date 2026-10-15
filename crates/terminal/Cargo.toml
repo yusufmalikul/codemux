@@ -7,6 +7,8 @@ version.workspace = true
 
 [lib]
 name = "codemux_terminal"
+# No doc examples; skip the doc-test build on every `cargo test`.
+doctest = false
 
 [dependencies]
 alacritty_terminal.workspace = true

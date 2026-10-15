@@ -7,6 +7,8 @@ version.workspace = true
 
 [lib]
 name = "codemux_core"
+# No doc examples; skip the doc-test build on every `cargo test`.
+doctest = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

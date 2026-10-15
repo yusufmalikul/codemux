@@ -426,6 +426,7 @@ impl App {
                 args: spec.args,
                 env: spec.env,
                 working_directory: Some(spec.cwd.clone()),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2158,16 +2159,12 @@ mod tests {
         let (dir, mut app) = fixture();
         let pro = add_pro(&mut app, dir.path());
         // Like Claude: takes a moment to exit after SIGHUP.
-        let pid = fake_claude_tab(&mut app, dir.path(), "trap 'sleep 0.5; exit 0' HUP; while :; do sleep 0.05; done");
+        let pid = fake_claude_tab(&mut app, dir.path(), "trap 'sleep 0.5; exit 0' HUP", "while :; do sleep 0.05; done");
 
         let _ = app.update(Message::SwitchAccount("s1".into(), pro));
         assert!(app.tabs.is_empty(), "tab not closed: {:?}", app.error);
         assert!(app.pending_switch.is_some(), "moved before the process exited");
-        let start = Instant::now();
-        while app.pending_switch.is_some() && start.elapsed() < SWITCH_TIMEOUT {
-            std::thread::sleep(SWITCH_POLL);
-            let _ = app.update(Message::SwitchCheck);
-        }
+        finish_switch(&mut app);
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(!app.scanner.is_running(pid), "moved while the process still ran");
         let pro_dir = dir.path().join(".claude-pro");
@@ -2178,11 +2175,12 @@ mod tests {
         assert!(app.resumed[0].args.last().unwrap().contains("--resume s1"));
     }
 
-    /// A tab that runs `script` as if it were Claude, idle, with session s1.
-    fn fake_claude_tab(app: &mut App, cwd: &std::path::Path, script: &str) -> u32 {
+    /// A tab that runs `<trap>; <idle loop>` as if it were Claude, idle,
+    /// with session s1. Returns once its trap is set.
+    fn fake_claude_tab(app: &mut App, cwd: &std::path::Path, trap: &str, idle: &str) -> u32 {
         let spec = LaunchSpec {
             program: "/bin/sh".into(),
-            args: vec!["-c".into(), script.into()],
+            args: vec!["-c".into(), format!("{trap}; touch ready; {idle}")],
             env: Default::default(),
             cwd: cwd.to_path_buf(),
         };
@@ -2190,9 +2188,22 @@ mod tests {
         let tab = app.tabs.last_mut().unwrap();
         tab.busy = Some(false);
         let pid = tab.term.child_pid().expect("no process");
-        std::thread::sleep(Duration::from_millis(300));
+        let start = Instant::now();
+        while !cwd.join("ready").exists() && start.elapsed() < SWITCH_TIMEOUT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(app.scanner.is_running(pid), "process not seen");
         pid
+    }
+
+    /// Run the switch checks, as the app's timer does, until the switch ends.
+    /// Polls faster than the app, so the test does not wait longer than needed.
+    fn finish_switch(app: &mut App) {
+        let start = Instant::now();
+        while app.pending_switch.is_some() && start.elapsed() < SWITCH_TIMEOUT + SWITCH_POLL * 2 {
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = app.update(Message::SwitchCheck);
+        }
     }
 
     /// Claude keeps redrawing its screen while idle. After its tab closes,
@@ -2203,17 +2214,13 @@ mod tests {
         let (dir, mut app) = fixture();
         let pro = add_pro(&mut app, dir.path());
         // Like Claude: redraws while idle, and writes a lot when it gets SIGHUP.
-        let script = "trap 'yes goodbye | head -c 400000; exit 0' HUP; while :; do echo redraw; sleep 0.001; done";
-        let pid = fake_claude_tab(&mut app, dir.path(), script);
+        let trap = "trap 'yes goodbye | head -c 400000; exit 0' HUP";
+        let pid = fake_claude_tab(&mut app, dir.path(), trap, "while :; do echo redraw; sleep 0.001; done");
         // Let the output pile up, like a tab nobody looks at.
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(300));
 
         let _ = app.update(Message::SwitchAccount("s1".into(), pro));
-        let start = Instant::now();
-        while app.pending_switch.is_some() && start.elapsed() < SWITCH_TIMEOUT + SWITCH_POLL * 2 {
-            std::thread::sleep(SWITCH_POLL);
-            let _ = app.update(Message::SwitchCheck);
-        }
+        finish_switch(&mut app);
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(!app.scanner.is_running(pid), "process still runs");
         assert!(s1_in(&dir.path().join(".claude-pro")).exists());

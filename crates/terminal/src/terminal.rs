@@ -204,55 +204,59 @@ mod tests {
             .unwrap_or(false)
     }
 
+    /// Start `sh -c "<trap>; <loop>"` and wait until its trap is set (it
+    /// creates `ready` then), so a stop cannot come too early.
+    #[cfg(unix)]
+    fn start_trapped(id: u64, trap: &str, stop_grace: std::time::Duration) -> (tempfile::TempDir, Terminal, u32) {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            backend: crate::settings::BackendSettings {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), format!("{trap}; touch ready; while :; do sleep 0.05; done")],
+                working_directory: Some(dir.path().to_path_buf()),
+                stop_grace,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let term = Terminal::new(id, settings).unwrap();
+        let pid = term.child_pid().unwrap();
+        assert!(wait_until(|| dir.path().join("ready").exists()), "program did not start");
+        (dir, term, pid)
+    }
+
+    /// Wait up to 8 seconds for `done`.
+    fn wait_until(done: impl Fn() -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while !done() && start.elapsed() < std::time::Duration::from_secs(8) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        done()
+    }
+
     /// Claude writes to the terminal when it gets SIGHUP. After the tab is
     /// closed nobody reads that output, so the program blocked on the write
     /// and never exited (a stuck `claude` per closed tab).
     #[cfg(unix)]
     #[test]
     fn closing_stops_a_program_that_prints_on_hangup() {
-        let script = "trap 'yes goodbye | head -c 400000; exit 0' HUP; \
-                      while :; do sleep 0.05; done";
-        let settings = Settings {
-            backend: crate::settings::BackendSettings {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), script.into()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let term = Terminal::new(1, settings).unwrap();
-        let pid = term.child_pid().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // The grace is longer than the wait, so the program must exit by
+        // itself: being killed after the grace does not pass this test.
+        let grace = std::time::Duration::from_secs(60);
+        let (_dir, term, pid) = start_trapped(1, "trap 'yes goodbye | head -c 400000; exit 0' HUP", grace);
         assert!(running(pid));
         drop(term);
-        let start = std::time::Instant::now();
-        while running(pid) && start.elapsed() < std::time::Duration::from_secs(8) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        assert!(!running(pid), "program still runs after the terminal closed");
+        assert!(wait_until(|| !running(pid)), "program still runs after the terminal closed");
     }
 
-    /// A program that ignores SIGHUP is stopped too, a little later.
+    /// A program that ignores SIGHUP is killed after the grace.
     #[cfg(unix)]
     #[test]
     fn closing_stops_a_program_that_ignores_hangup() {
-        let settings = Settings {
-            backend: crate::settings::BackendSettings {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), "trap '' HUP; while :; do sleep 0.05; done".into()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let term = Terminal::new(2, settings).unwrap();
-        let pid = term.child_pid().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let grace = std::time::Duration::from_millis(200);
+        let (_dir, term, pid) = start_trapped(2, "trap '' HUP", grace);
         drop(term);
-        let start = std::time::Instant::now();
-        while running(pid) && start.elapsed() < std::time::Duration::from_secs(8) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        assert!(!running(pid), "program still runs after the terminal closed");
+        assert!(wait_until(|| !running(pid)), "program still runs after the terminal closed");
     }
 
     #[test]

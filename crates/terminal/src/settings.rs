@@ -1,6 +1,6 @@
 // Based on iced_term 0.8 (https://github.com/Harzu/iced_term), MIT License,
 // Copyright (c) Ilya Shvyryalkin. Modified for codemux. See NOTICE.
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use crate::ColorPalette;
 use iced::Font;
@@ -24,6 +24,9 @@ pub struct BackendSettings {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub working_directory: Option<PathBuf>,
+    /// How long the program gets to exit after SIGHUP, when the terminal
+    /// closes, before it is killed.
+    pub stop_grace: Duration,
 }
 
 impl Default for BackendSettings {
@@ -33,6 +36,7 @@ impl Default for BackendSettings {
             args: vec![],
             env: HashMap::new(),
             working_directory: None,
+            stop_grace: Duration::from_secs(3),
         }
     }
 }
