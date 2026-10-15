@@ -16,3 +16,5 @@ alacritty_terminal = "0.26.0"
 # Fast debug builds for `cargo watch`: optimize dependencies, keep our own crates quick to rebuild.
 [profile.dev.package."*"]
 opt-level = 3
+# Line numbers only for dependencies: backtraces still work, target/ stays much smaller.
+debug = "line-tables-only"
