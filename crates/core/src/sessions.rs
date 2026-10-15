@@ -34,6 +34,8 @@ pub struct ChatMessage {
 pub struct SessionMeta {
     pub id: String,
     pub path: PathBuf,
+    /// The account whose config folder holds the file. 0 is the default.
+    pub account: u64,
     pub cwd: Option<PathBuf>,
     pub git_branch: Option<String>,
     pub ai_title: Option<String>,
@@ -239,10 +241,21 @@ pub fn delete_session(projects_dir: &Path, path: &Path) -> std::io::Result<()> {
 }
 
 /// Incremental index. Reads only lines added since the last scan.
+///
+/// It reads the projects folder of every account. A session should be in
+/// one account only, but a copy made by hand can put the same ID in two.
+/// Then only the most recently changed file counts.
 #[derive(Default)]
 pub struct Index {
     entries: HashMap<PathBuf, Entry>,
     by_id: HashMap<String, PathBuf>,
+}
+
+/// One account's projects folder to scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Root {
+    pub account: u64,
+    pub projects_dir: PathBuf,
 }
 
 struct Entry {
@@ -260,31 +273,33 @@ impl Entry {
 }
 
 impl Index {
-    /// Scan all project folders. Returns true if anything changed.
-    pub fn refresh(&mut self, projects_dir: &Path) -> bool {
+    /// Scan the project folders of every account. Returns true if anything changed.
+    pub fn refresh(&mut self, roots: &[Root]) -> bool {
         let mut changed = false;
         let mut seen = std::collections::HashSet::new();
 
-        let Ok(projects) = fs::read_dir(projects_dir) else { return false };
-        for project in projects.flatten() {
-            let Ok(files) = fs::read_dir(project.path()) else { continue };
-            // Only top-level files. Subagent (sidechain) files live in sub-folders.
-            for file in files.flatten() {
-                let path = file.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                seen.insert(path.clone());
-                if self.update_file(&path) {
-                    changed = true;
+        for root in roots {
+            let Ok(projects) = fs::read_dir(&root.projects_dir) else { continue };
+            for project in projects.flatten() {
+                let Ok(files) = fs::read_dir(project.path()) else { continue };
+                // Only top-level files. Subagent (sidechain) files live in sub-folders.
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    seen.insert(path.clone());
+                    if self.update_file(&path, root.account) {
+                        changed = true;
+                    }
                 }
             }
         }
 
         let before = self.entries.len();
         self.entries.retain(|p, _| seen.contains(p));
-        if before != self.entries.len() {
-            self.by_id.retain(|_, p| seen.contains(p));
+        if changed || before != self.entries.len() {
+            self.rebuild_by_id();
         }
 
         // Folders can be deleted at any time, so check them on every scan.
@@ -303,24 +318,35 @@ impl Index {
         changed || before != self.entries.len()
     }
 
-    fn update_file(&mut self, path: &Path) -> bool {
+    /// Point each ID at its newest file, so a stale copy is never used.
+    fn rebuild_by_id(&mut self) {
+        self.by_id.clear();
+        for (path, e) in &self.entries {
+            let newer = match self.by_id.get(&e.meta.id).and_then(|p| self.entries.get(p)) {
+                Some(old) => e.meta.modified > old.meta.modified,
+                None => true,
+            };
+            if newer {
+                self.by_id.insert(e.meta.id.clone(), path.clone());
+            }
+        }
+    }
+
+    /// True if this entry is the one its ID points to.
+    fn is_current(&self, path: &Path, e: &Entry) -> bool {
+        self.by_id.get(&e.meta.id).is_some_and(|p| p == path)
+    }
+
+    fn update_file(&mut self, path: &Path, account: u64) -> bool {
         use std::io::{Read, Seek, SeekFrom};
 
         let Ok(md) = fs::metadata(path) else { return false };
         let len = md.len();
-        if !self.entries.contains_key(path) {
-            if let Some(id) = path.file_stem() {
-                self.by_id.insert(id.to_string_lossy().into_owned(), path.to_path_buf());
-            }
-        }
+        let fresh = |id: String| SessionMeta { id, path: path.to_path_buf(), account, ..Default::default() };
         let entry = self.entries.entry(path.to_path_buf()).or_insert_with(|| Entry {
             offset: 0,
             cwd_exists: false,
-            meta: SessionMeta {
-                id: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-                path: path.to_path_buf(),
-                ..Default::default()
-            },
+            meta: fresh(path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()),
         });
         if len == entry.offset {
             return false;
@@ -328,7 +354,7 @@ impl Index {
         if len < entry.offset {
             // File was replaced or cut. Read it again from the start.
             entry.offset = 0;
-            entry.meta = SessionMeta { id: entry.meta.id.clone(), path: path.to_path_buf(), ..Default::default() };
+            entry.meta = fresh(entry.meta.id.clone());
         }
 
         let Ok(mut f) = fs::File::open(path) else { return false };
@@ -361,13 +387,14 @@ impl Index {
 
     /// Number of sessions that `sessions()` returns.
     pub fn count(&self) -> usize {
-        self.entries.values().filter(|e| e.listed()).count()
+        self.entries.iter().filter(|(p, e)| e.listed() && self.is_current(p, e)).count()
     }
 
     /// Sessions with at least one real message whose folder still exists,
     /// newest first.
     pub fn sessions(&self) -> Vec<&SessionMeta> {
-        let mut list: Vec<_> = self.entries.values().filter(|e| e.listed()).map(|e| &e.meta).collect();
+        let mut list: Vec<_> =
+            self.entries.iter().filter(|(p, e)| e.listed() && self.is_current(p, e)).map(|(_, e)| &e.meta).collect();
         list.sort_by(|a, b| b.sort_time().cmp(&a.sort_time()));
         list
     }
@@ -385,6 +412,10 @@ not json at all
 {"type":"assistant","sessionId":"s1","cwd":"/tmp/proj","gitBranch":"fix/webhook","timestamp":"2026-10-13T08:02:00Z","message":{}}
 {"type":"last-prompt","lastPrompt":"and add a test","sessionId":"s1"}
 "#;
+
+    fn roots(projects_dir: &Path) -> Vec<Root> {
+        vec![Root { account: 0, projects_dir: projects_dir.to_path_buf() }]
+    }
 
     fn write_fixture(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("proj");
@@ -481,18 +512,18 @@ not json at all
         let dir = tempfile::tempdir().unwrap();
         let f = write_fixture(dir.path(), FIXTURE);
         let mut idx = Index::default();
-        assert!(idx.refresh(dir.path()));
+        assert!(idx.refresh(&roots(dir.path())));
         assert_eq!(idx.get("s1").unwrap().title(), "fix the webhook retry");
-        assert!(!idx.refresh(dir.path()));
+        assert!(!idx.refresh(&roots(dir.path())));
 
         // Half a line: not applied yet.
         let mut h = fs::OpenOptions::new().append(true).open(&f).unwrap();
         write!(h, r#"{{"type":"ai-title","aiTitle":"Fix webhook"#).unwrap();
-        idx.refresh(dir.path());
+        idx.refresh(&roots(dir.path()));
         assert_eq!(idx.get("s1").unwrap().ai_title, None);
 
         writeln!(h, r#" retry","sessionId":"s1"}}"#).unwrap();
-        assert!(idx.refresh(dir.path()));
+        assert!(idx.refresh(&roots(dir.path())));
         assert_eq!(idx.get("s1").unwrap().title(), "Fix webhook retry");
     }
 
@@ -534,6 +565,37 @@ not json at all
         assert!(f.exists());
     }
 
+    /// Sessions of every account are listed, each with its account. If the
+    /// same ID is in two accounts, only the newer file counts.
+    #[test]
+    fn index_reads_all_accounts_and_prefers_newest_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        let body = FIXTURE.replace("/tmp/proj", &work.display().to_string());
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        write_fixture(&a, &body);
+        let copy = write_fixture(&b, &body.replace("fix the   webhook retry", "newer copy"));
+        let roots = vec![Root { account: 0, projects_dir: a.clone() }, Root { account: 7, projects_dir: b.clone() }];
+
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        fs::File::options().write(true).open(a.join("proj/s1.jsonl")).unwrap().set_modified(past).unwrap();
+        let mut idx = Index::default();
+        idx.refresh(&roots);
+        assert_eq!(idx.count(), 1);
+        assert_eq!(idx.sessions().len(), 1);
+        let m = idx.get("s1").unwrap();
+        assert_eq!((m.account, m.path.clone()), (7, copy.clone()));
+        assert_eq!(m.first_prompt.as_deref(), Some("newer copy"));
+
+        // The newer copy is moved away: the other one counts again.
+        fs::remove_file(&copy).unwrap();
+        idx.refresh(&roots);
+        assert_eq!(idx.get("s1").unwrap().account, 0);
+        assert_eq!(idx.count(), 1);
+    }
+
     #[test]
     fn index_ignores_subagent_folders() {
         let dir = tempfile::tempdir().unwrap();
@@ -545,7 +607,7 @@ not json at all
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("agent-x.jsonl"), &body).unwrap();
         let mut idx = Index::default();
-        idx.refresh(dir.path());
+        idx.refresh(&roots(dir.path()));
         assert_eq!(idx.sessions().len(), 1);
     }
 }

@@ -56,6 +56,14 @@ impl ProcScanner {
         );
     }
 
+    /// True while a process runs. A finished process that was not reaped
+    /// yet (a zombie) counts as stopped: it can no longer write files.
+    pub fn is_running(&mut self, pid: u32) -> bool {
+        let pid = Pid::from_u32(pid);
+        self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+        self.sys.process(pid).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
+    }
+
     /// Current working directory of a process, if the OS lets us read it.
     pub fn cwd_of(&self, pid: u32) -> Option<PathBuf> {
         self.sys.process(Pid::from_u32(pid))?.cwd().map(Path::to_path_buf)
@@ -91,12 +99,15 @@ impl ProcScanner {
 /// Pick the session file that a Claude process (started at `started` in `cwd`)
 /// is writing to: the most recently changed `.jsonl` in its project folder that
 /// changed after the process started and is not already taken by another tab.
-pub fn match_session(projects_dir: &Path, cwd: &Path, started: SystemTime, taken: &HashSet<String>) -> Option<String> {
-    let dir = projects_dir.join(crate::paths::project_folder_name(cwd));
+/// The process may run with any account, so every projects folder is checked.
+pub fn match_session(projects_dirs: &[PathBuf], cwd: &Path, started: SystemTime, taken: &HashSet<String>) -> Option<String> {
+    let folder = crate::paths::project_folder_name(cwd);
     // start_time has 1 second precision.
     let since = started.checked_sub(Duration::from_secs(2)).unwrap_or(started);
-    fs::read_dir(dir)
-        .ok()?
+    projects_dirs
+        .iter()
+        .filter_map(|d| fs::read_dir(d.join(&folder)).ok())
+        .flatten()
         .flatten()
         .filter_map(|e| {
             let path = e.path();
@@ -142,11 +153,21 @@ mod tests {
         set("b", now);
 
         let start = now - Duration::from_secs(10);
-        assert_eq!(match_session(dir.path(), cwd, start, &HashSet::new()).as_deref(), Some("b"));
+        assert_eq!(match_session(&[dir.path().to_path_buf()], cwd, start, &HashSet::new()).as_deref(), Some("b"));
         let taken = HashSet::from(["b".to_string()]);
-        assert_eq!(match_session(dir.path(), cwd, start, &taken).as_deref(), Some("a"));
+        assert_eq!(match_session(&[dir.path().to_path_buf()], cwd, start, &taken).as_deref(), Some("a"));
         // Nothing written yet after a later start.
-        assert_eq!(match_session(dir.path(), cwd, now + Duration::from_secs(60), &HashSet::new()), None);
+        assert_eq!(match_session(&[dir.path().to_path_buf()], cwd, now + Duration::from_secs(60), &HashSet::new()), None);
+    }
+
+    #[test]
+    fn is_running_follows_a_real_process() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut scanner = ProcScanner::default();
+        assert!(scanner.is_running(child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!scanner.is_running(child.id()));
     }
 
     /// Real process tree: a shell that runs a program named `claude`.

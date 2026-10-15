@@ -30,6 +30,19 @@ pub struct AppState {
     /// Claude's session files are never changed.
     #[serde(default)]
     pub session_names: BTreeMap<String, String>,
+    /// Extra Claude accounts. The default account (`~/.claude`) is not listed.
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+}
+
+/// A Claude account: its own Claude Code config folder (`CLAUDE_CONFIG_DIR`),
+/// with its own login and sessions.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Account {
+    /// Never 0: 0 is the default account.
+    pub id: u64,
+    pub name: String,
+    pub config_dir: std::path::PathBuf,
 }
 
 /// A named group of sessions, shown as a folder in the sidebar tree.
@@ -78,7 +91,8 @@ mod tests {
         let p = dir.path().join("sub").join("state.json");
         let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sidebar: true, sidebar_width: Some(420.0),
             workspaces: vec![Workspace { id: 1, name: "Work".into(), sessions: vec!["a".into()], collapsed: true }],
-            default_collapsed: true, session_names: BTreeMap::from([("a".into(), "My name".into())]) };
+            default_collapsed: true, session_names: BTreeMap::from([("a".into(), "My name".into())]),
+            accounts: vec![Account { id: 1, name: "Pro".into(), config_dir: "/home/me/.claude-pro".into() }] };
         s.save(&p).unwrap();
         let loaded = AppState::load(&p);
         assert_eq!(loaded.open_sessions, s.open_sessions);
@@ -87,6 +101,7 @@ mod tests {
         assert_eq!(loaded.workspaces, s.workspaces);
         assert!(loaded.default_collapsed);
         assert_eq!(loaded.session_names, s.session_names);
+        assert_eq!(loaded.accounts, s.accounts);
         assert_eq!(loaded.version, STATE_VERSION);
         assert!(!p.with_extension("tmp").exists());
     }

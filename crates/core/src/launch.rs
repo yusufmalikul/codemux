@@ -1,7 +1,10 @@
 //! Builds the command and environment for a new PTY, per OS (spec 11.1).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Environment variable that picks Claude Code's config folder (the account).
+pub const CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaunchSpec {
@@ -42,6 +45,26 @@ fn user_shell() -> String {
     })
 }
 
+fn account_env(config_dir: Option<&Path>) -> HashMap<String, String> {
+    let mut env = base_env();
+    if let Some(dir) = config_dir {
+        env.insert(CONFIG_ENV.to_string(), dir.to_string_lossy().into_owned());
+    }
+    env
+}
+
+/// Sign in to an account: `claude auth login` with its config folder.
+pub fn login(config_dir: &Path, cwd: PathBuf) -> LaunchSpec {
+    #[cfg(unix)]
+    let (program, args) = (user_shell(), vec!["-l".to_string(), "-c".to_string(), "claude auth login".to_string()]);
+    #[cfg(windows)]
+    let (program, args) = (
+        "cmd.exe".to_string(),
+        vec!["/C".to_string(), "claude".to_string(), "auth".to_string(), "login".to_string()],
+    );
+    LaunchSpec { program, args, env: account_env(Some(config_dir)), cwd }
+}
+
 /// A plain interactive shell, like a new tab in a normal terminal.
 pub fn shell(cwd: PathBuf) -> LaunchSpec {
     #[cfg(unix)]
@@ -52,7 +75,10 @@ pub fn shell(cwd: PathBuf) -> LaunchSpec {
 }
 
 /// Run Claude Code through the user's login shell, so PATH matches a normal terminal.
-pub fn claude(cwd: PathBuf, mode: &ClaudeMode) -> Option<LaunchSpec> {
+/// `config_dir` picks the account: Some sets `CLAUDE_CONFIG_DIR`, None keeps
+/// the default. The default must stay unset: Claude keys its saved login by
+/// this value, so setting it to `~/.claude` finds no login.
+pub fn claude(cwd: PathBuf, mode: &ClaudeMode, config_dir: Option<&Path>) -> Option<LaunchSpec> {
     let (flag, id) = match mode {
         ClaudeMode::Resume(id) => ("--resume", id),
         ClaudeMode::New(id) => ("--session-id", id),
@@ -71,7 +97,7 @@ pub fn claude(cwd: PathBuf, mode: &ClaudeMode) -> Option<LaunchSpec> {
         "cmd.exe".to_string(),
         vec!["/C".to_string(), "claude".to_string(), flag.to_string(), id.clone()],
     );
-    Some(LaunchSpec { program, args, env: base_env(), cwd })
+    Some(LaunchSpec { program, args, env: account_env(config_dir), cwd })
 }
 
 /// Shell script that starts `claude`.
@@ -151,17 +177,25 @@ mod tests {
         assert!(!is_safe_id("x; rm -rf ~"));
         assert!(!is_safe_id("$(id)"));
         assert!(!is_safe_id(""));
-        assert!(claude(PathBuf::from("/"), &ClaudeMode::Resume("a b".into())).is_none());
+        assert!(claude(PathBuf::from("/"), &ClaudeMode::Resume("a b".into()), None).is_none());
     }
 
     #[cfg(unix)]
     #[test]
     fn resume_runs_through_login_shell() {
-        let s = claude(PathBuf::from("/p"), &ClaudeMode::Resume("abc-1".into())).unwrap();
+        let s = claude(PathBuf::from("/p"), &ClaudeMode::Resume("abc-1".into()), None).unwrap();
         assert_eq!(&s.args[..2], &["-l", "-c"]);
         assert!(s.args[2].ends_with("exec claude --resume abc-1"));
         assert_eq!(s.env["TERM"], "xterm-256color");
         assert_eq!(s.cwd, PathBuf::from("/p"));
+        assert!(!s.env.contains_key(CONFIG_ENV), "default account must not set the config folder");
+    }
+
+    #[test]
+    fn other_account_sets_config_folder() {
+        let s = claude(PathBuf::from("/p"), &ClaudeMode::Resume("abc-1".into()), Some(Path::new("/home/me/.claude-pro"))).unwrap();
+        assert_eq!(s.env[CONFIG_ENV], "/home/me/.claude-pro");
+        assert_eq!(login(Path::new("/x"), PathBuf::from("/p")).env[CONFIG_ENV], "/x");
     }
 
     /// Runs the real script against a fake native install laid out like

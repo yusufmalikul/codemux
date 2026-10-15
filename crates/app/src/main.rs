@@ -8,8 +8,8 @@ use chrono::{DateTime, Local, Utc};
 use codemux_core::detect::{self, ClaudeProc, ProcScanner};
 use codemux_core::launch::{self, ClaudeMode, LaunchSpec};
 use codemux_core::paths;
-use codemux_core::sessions::{Index, Role, SessionMeta};
-use codemux_core::store::{AppState, Workspace};
+use codemux_core::sessions::{Index, Role, Root, SessionMeta};
+use codemux_core::store::{Account, AppState, Workspace};
 use codemux_terminal as term;
 use iced::widget::{button, column, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
@@ -34,6 +34,13 @@ const TEXT_SIZE: u32 = 16;
 /// Smaller text for labels and secondary info.
 const SMALL_TEXT_SIZE: u32 = 14;
 const WORKSPACE_INPUT: &str = "new-workspace-name";
+const ACCOUNT_INPUT: &str = "new-account-name";
+const DEFAULT_ACCOUNT: &str = "Default";
+/// How long to wait for Claude to exit before moving its session.
+const SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
+const SWITCH_POLL: Duration = Duration::from_millis(200);
+/// Originals of moved sessions are kept this long, in case something went wrong.
+const MOVE_BACKUP_AGE: Duration = Duration::from_secs(14 * 86_400);
 const RENAME_INPUT: &str = "rename-session";
 /// iced ships only Fira Sans Regular, so bold text fell back to another
 /// font. The app loads Fira Sans Bold itself and asks for it by name.
@@ -118,6 +125,9 @@ struct Tab {
     /// A `claude` process found inside a Shell tab.
     claude: Option<ClaudeProc>,
     cwd: PathBuf,
+    /// Account the tab started Claude with. Once the session file exists,
+    /// its location (the index) is the truth.
+    account: u64,
     /// Workspace the tab is shown in. None is the default workspace. Kept in
     /// step with the workspace of its session, once it has one.
     workspace: Option<u64>,
@@ -131,6 +141,20 @@ enum Selected {
     None,
     Tab(u64),
     Session(String),
+    /// The account list: add, sign in, remove.
+    Accounts,
+}
+
+/// A session waiting for its Claude process to exit before it moves to
+/// another account (spec 11.7).
+struct PendingSwitch {
+    sid: String,
+    to: u64,
+    /// Claude's process. None if the tab had no process.
+    pid: Option<u32>,
+    started: Instant,
+    /// Open the session again with the new account once it has moved.
+    resume: bool,
 }
 
 struct App {
@@ -140,7 +164,17 @@ struct App {
     index: Index,
     /// Bumped when the index changes, so the lazy sidebar knows to rebuild.
     index_version: u64,
-    projects_dir: Option<PathBuf>,
+    /// Config folder of the default account (`~/.claude`).
+    default_config: Option<PathBuf>,
+    /// Extra accounts (saved in state.json).
+    accounts: Vec<Account>,
+    /// Name typed for a new account. Some while the name box is shown.
+    new_account: Option<String>,
+    pending_switch: Option<PendingSwitch>,
+    /// Where the originals of moved sessions are kept for a while.
+    backup_dir: Option<PathBuf>,
+    /// New accounts get a config folder here (`<home>/.claude-<name>`).
+    home: PathBuf,
     scanner: ProcScanner,
     state_path: Option<PathBuf>,
     /// Sessions that were open when the app last ran (spec 11.4).
@@ -172,6 +206,19 @@ struct App {
     session_names: BTreeMap<String, String>,
     /// Session being renamed, and the text typed so far.
     renaming: Option<(String, String)>,
+}
+
+/// One choice in the "Account" picker. `id` 0 is the default account.
+#[derive(Debug, Clone, PartialEq)]
+struct AccountChoice {
+    id: u64,
+    name: String,
+}
+
+impl std::fmt::Display for AccountChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
 }
 
 /// One choice in the "Workspace" picker. `id` None is the default workspace.
@@ -233,6 +280,18 @@ enum Message {
     /// Save the typed name. An empty name goes back to Claude's title.
     RenameSave,
     RenameCancel,
+    ShowAccounts,
+    NewAccountStart,
+    NewAccountName(String),
+    NewAccountCreate,
+    NewAccountCancel,
+    /// Open a tab that runs `claude auth login` for an account.
+    AccountLogin(u64),
+    RemoveAccount(u64),
+    /// Continue a session with another account: stop it, move its files, resume.
+    SwitchAccount(String, u64),
+    /// Check if the stopped Claude of a pending switch has exited.
+    SwitchCheck,
 }
 
 impl App {
@@ -241,19 +300,29 @@ impl App {
         let scale = iced::window::latest()
             .and_then(iced::window::scale_factor)
             .map(Message::ScaleFactor);
-        (Self::with_paths(paths::projects_dir(), state_path), scale)
+        (Self::with_paths(paths::claude_dir(), state_path), scale)
     }
 
-    fn with_paths(projects_dir: Option<PathBuf>, state_path: Option<PathBuf>) -> Self {
+    /// `default_config` is the default account's Claude config folder.
+    fn with_paths(default_config: Option<PathBuf>, state_path: Option<PathBuf>) -> Self {
         let state = state_path.as_deref().map(AppState::load).unwrap_or_default();
         let previously_open = state.open_sessions;
+        let backup_dir = state_path.as_deref().and_then(|p| p.parent()).map(|d| d.join("moved-sessions"));
+        if let Some(dir) = &backup_dir {
+            codemux_core::accounts::prune_backups(dir, MOVE_BACKUP_AGE);
+        }
         let mut app = Self {
             tabs: Vec::new(),
             selected: Selected::None,
             next_id: 0,
             index: Index::default(),
             index_version: 0,
-            projects_dir,
+            default_config,
+            accounts: state.accounts,
+            new_account: None,
+            pending_switch: None,
+            backup_dir,
+            home: paths::home_dir().unwrap_or_else(|| PathBuf::from(".")),
             scanner: ProcScanner::default(),
             state_path,
             previously_open,
@@ -278,11 +347,56 @@ impl App {
     }
 
     fn refresh_index(&mut self) {
-        if let Some(dir) = &self.projects_dir {
-            if self.index.refresh(dir) {
-                self.index_version += 1;
-            }
+        if self.index.refresh(&self.roots()) {
+            self.index_version += 1;
         }
+    }
+
+    /// Config folder of an account. 0 is the default account.
+    fn config_of(&self, account: u64) -> Option<PathBuf> {
+        match account {
+            0 => self.default_config.clone(),
+            id => self.accounts.iter().find(|a| a.id == id).map(|a| a.config_dir.clone()),
+        }
+    }
+
+    /// `CLAUDE_CONFIG_DIR` for an account. The default account leaves it
+    /// unset (see launch::claude).
+    fn launch_config(&self, account: u64) -> Option<PathBuf> {
+        (account != 0).then(|| self.config_of(account)).flatten()
+    }
+
+    fn roots(&self) -> Vec<Root> {
+        std::iter::once(0)
+            .chain(self.accounts.iter().map(|a| a.id))
+            .filter_map(|id| self.config_of(id).map(|c| Root { account: id, projects_dir: c.join("projects") }))
+            .collect()
+    }
+
+    fn account_name(&self, account: u64) -> String {
+        self.accounts.iter().find(|a| a.id == account).map(|a| a.name.clone()).unwrap_or_else(|| DEFAULT_ACCOUNT.into())
+    }
+
+    fn account_choices(&self) -> Vec<AccountChoice> {
+        std::iter::once(AccountChoice { id: 0, name: DEFAULT_ACCOUNT.into() })
+            .chain(self.accounts.iter().map(|a| AccountChoice { id: a.id, name: a.name.clone() }))
+            .collect()
+    }
+
+    /// The account a tab runs with: its session file's account, or the one
+    /// it was started with.
+    fn tab_account(&self, tab: &Tab) -> u64 {
+        tab.session_id.as_deref().and_then(|s| self.index.get(s)).map_or(tab.account, |m| m.account)
+    }
+
+    /// Account of what the user is looking at. A new session uses it.
+    fn current_account(&self) -> u64 {
+        let id = match &self.selected {
+            Selected::Tab(id) => self.tabs.iter().find(|t| t.id == *id).map_or(0, |t| self.tab_account(t)),
+            Selected::Session(sid) => self.index.get(sid).map_or(0, |m| m.account),
+            _ => 0,
+        };
+        if id == 0 || self.accounts.iter().any(|a| a.id == id) { id } else { 0 }
     }
 
     fn save_state(&self) {
@@ -293,11 +407,12 @@ impl App {
             workspaces: self.workspaces.clone(),
             default_collapsed: self.default_collapsed,
             session_names: self.session_names.clone(),
+            accounts: self.accounts.clone(),
         }
         .save(path);
     }
 
-    fn spawn(&mut self, kind: TabKind, spec: LaunchSpec, session_id: Option<String>) -> Task<Message> {
+    fn spawn(&mut self, kind: TabKind, spec: LaunchSpec, session_id: Option<String>, account: u64) -> Task<Message> {
         let id = self.next_id;
         self.next_id += 1;
         let settings = term::settings::Settings {
@@ -326,6 +441,7 @@ impl App {
                     session_id,
                     claude: None,
                     cwd: spec.cwd,
+                    account,
                     workspace,
                     last_output: Instant::now(),
                     busy: None,
@@ -376,7 +492,7 @@ impl App {
             self.selected = Selected::Tab(id);
             return self.focus_tab(id);
         }
-        let Some(cwd) = self.index.get(&sid).and_then(|m| m.cwd.clone()) else {
+        let Some((cwd, account)) = self.index.get(&sid).and_then(|m| Some((m.cwd.clone()?, m.account))) else {
             self.error = Some("Folder session tidak diketahui.".into());
             return Task::none();
         };
@@ -384,10 +500,10 @@ impl App {
             self.error = Some(format!("Folder no longer exists: {}", cwd.display()));
             return Task::none();
         }
-        match launch::claude(cwd, &ClaudeMode::Resume(sid.clone())) {
+        match launch::claude(cwd, &ClaudeMode::Resume(sid.clone()), self.launch_config(account).as_deref()) {
             Some(spec) => {
                 self.previously_open.retain(|s| s != &sid);
-                self.spawn(TabKind::Claude, spec, Some(sid))
+                self.spawn(TabKind::Claude, spec, Some(sid), account)
             }
             None => {
                 self.error = Some("Session ID tidak valid.".into());
@@ -403,6 +519,7 @@ impl App {
             return;
         }
         self.scanner.refresh();
+        let projects_dirs: Vec<PathBuf> = self.roots().into_iter().map(|r| r.projects_dir).collect();
         let mut taken: HashSet<String> = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
         for tab in self.tabs.iter_mut().filter(|t| t.kind == TabKind::Shell) {
             let Some(shell_pid) = tab.term.child_pid() else { continue };
@@ -417,14 +534,14 @@ impl App {
                 }
                 tab.claude = found;
             }
-            let (Some(proc_), Some(dir)) = (&tab.claude, &self.projects_dir) else { continue };
+            let Some(proc_) = &tab.claude else { continue };
             let cwd = proc_.cwd.clone().unwrap_or_else(|| tab.cwd.clone());
             let mut others = taken.clone();
             if let Some(own) = &tab.session_id {
                 others.remove(own);
             }
             // Re-check every tick: /clear or /resume inside Claude switches the file.
-            if let Some(sid) = detect::match_session(dir, &cwd, proc_.started, &others) {
+            if let Some(sid) = detect::match_session(&projects_dirs, &cwd, proc_.started, &others) {
                 if tab.session_id.as_deref() != Some(&sid) {
                     if let Some(old) = tab.session_id.replace(sid.clone()) {
                         taken.remove(&old);
@@ -436,7 +553,7 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        if matches!(message, Message::NewSession | Message::NewTerminal | Message::NewWorkspaceStart) {
+        if matches!(message, Message::NewSession | Message::NewTerminal | Message::NewWorkspaceStart | Message::ShowAccounts) {
             self.add_menu = false;
         }
         match message {
@@ -484,8 +601,9 @@ impl App {
             }
             Message::FolderPicked(Some(dir)) => {
                 let sid = launch::new_session_id();
-                if let Some(spec) = launch::claude(dir, &ClaudeMode::New(sid.clone())) {
-                    return self.spawn(TabKind::Claude, spec, Some(sid));
+                let account = self.current_account();
+                if let Some(spec) = launch::claude(dir, &ClaudeMode::New(sid.clone()), self.launch_config(account).as_deref()) {
+                    return self.spawn(TabKind::Claude, spec, Some(sid), account);
                 }
             }
             Message::FolderPicked(None) => {}
@@ -496,7 +614,7 @@ impl App {
                 }
                 .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from))
                 .unwrap_or_else(|| PathBuf::from("."));
-                return self.spawn(TabKind::Shell, launch::shell(cwd), None);
+                return self.spawn(TabKind::Shell, launch::shell(cwd), None, 0);
             }
             Message::SelectTab(id) => {
                 self.selected = Selected::Tab(id);
@@ -615,6 +733,21 @@ impl App {
                     tab.term.handle(term::Command::SetScaleFactor(scale));
                 }
             }
+            Message::ShowAccounts => {
+                self.confirm_delete = None;
+                self.selected = Selected::Accounts;
+            }
+            Message::NewAccountStart => {
+                self.new_account = Some(String::new());
+                return iced::widget::operation::focus(iced::widget::Id::new(ACCOUNT_INPUT));
+            }
+            Message::NewAccountName(name) => self.new_account = Some(name),
+            Message::NewAccountCancel => self.new_account = None,
+            Message::NewAccountCreate => return self.create_account(),
+            Message::AccountLogin(id) => return self.login(id),
+            Message::RemoveAccount(id) => self.remove_account(id),
+            Message::SwitchAccount(sid, to) => return self.switch_account(sid, to),
+            Message::SwitchCheck => return self.switch_check(),
             Message::SelectIndex(i) => {
                 if let Some(id) = self.tabs.get(i).map(|t| t.id) {
                     self.selected = Selected::Tab(id);
@@ -640,7 +773,7 @@ impl App {
         match &self.selected {
             Selected::Tab(id) => self.tabs.iter().find(|t| t.id == *id).and_then(|t| t.workspace),
             Selected::Session(sid) => self.workspace_of(sid),
-            Selected::None => None,
+            Selected::None | Selected::Accounts => None,
         }
     }
 
@@ -685,7 +818,8 @@ impl App {
             self.error = Some("This session is still running in a tab. Close the tab first.".into());
             return;
         }
-        let (Some(dir), Some(path)) = (self.projects_dir.clone(), self.index.get(sid).map(|m| m.path.clone())) else {
+        let found = self.index.get(sid).and_then(|m| Some((self.config_of(m.account)?.join("projects"), m.path.clone())));
+        let Some((dir, path)) = found else {
             self.error = Some("Session tidak ditemukan.".into());
             return;
         };
@@ -706,6 +840,123 @@ impl App {
             }
             Err(e) => self.error = Some(format!("Failed to delete session: {e}")),
         }
+    }
+
+    /// Add the typed account, then open a tab to log in to it.
+    fn create_account(&mut self) -> Task<Message> {
+        let name = self.new_account.take().unwrap_or_default();
+        match self.add_account(&name) {
+            Ok(Some(id)) => self.login(id),
+            Ok(None) => Task::none(),
+            Err(e) => {
+                self.error = Some(e);
+                Task::none()
+            }
+        }
+    }
+
+    /// Add an account with its folder `<home>/.claude-<name>`. A folder that
+    /// already exists (for example made by hand) is used as it is, login
+    /// included. Ok(None) for an empty name.
+    fn add_account(&mut self, name: &str) -> Result<Option<u64>, String> {
+        let name = name.trim().to_string();
+        let Some(dir) = paths::account_dir_for(&self.home, &name) else { return Ok(None) };
+        let same_dir = |d: &PathBuf| self.config_of(0).as_ref() == Some(d) || self.accounts.iter().any(|a| &a.config_dir == d);
+        if same_dir(&dir) || self.accounts.iter().any(|a| a.name.eq_ignore_ascii_case(&name)) || name.eq_ignore_ascii_case(DEFAULT_ACCOUNT) {
+            return Err(format!("An account named \"{name}\" already exists."));
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+        let id = self.accounts.iter().map(|a| a.id).max().unwrap_or(0) + 1;
+        self.accounts.push(Account { id, name, config_dir: dir });
+        self.error = None;
+        self.accounts_changed();
+        Ok(Some(id))
+    }
+
+    fn login(&mut self, id: u64) -> Task<Message> {
+        let Some(dir) = self.config_of(id).filter(|_| id != 0) else { return Task::none() };
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        self.spawn(TabKind::Shell, launch::login(&dir, home), None, id)
+    }
+
+    /// Forget an account. Its folder, login and sessions stay on disk.
+    fn remove_account(&mut self, id: u64) {
+        let in_use = self.tabs.iter().any(|t| self.tab_account(t) == id) || self.pending_switch.as_ref().is_some_and(|p| p.to == id);
+        if in_use {
+            self.error = Some("A tab still runs with this account. Close it first.".into());
+            return;
+        }
+        self.accounts.retain(|a| a.id != id);
+        self.error = None;
+        self.accounts_changed();
+    }
+
+    fn accounts_changed(&mut self) {
+        self.refresh_index();
+        self.workspaces_changed();
+    }
+
+    /// Continue a session with another account (spec 11.7). A running
+    /// session is stopped first, and only while Claude waits for input.
+    fn switch_account(&mut self, sid: String, to: u64) -> Task<Message> {
+        let Some(from) = self.index.get(&sid).map(|m| m.account) else {
+            self.error = Some("The session has no file yet. Send a first message, then switch.".into());
+            return Task::none();
+        };
+        if from == to || self.config_of(to).is_none() || self.pending_switch.is_some() {
+            return Task::none();
+        }
+        let Some(tab) = self.tabs.iter().find(|t| t.session_id.as_deref() == Some(sid.as_str())) else {
+            self.pending_switch = Some(PendingSwitch { sid, to, pid: None, started: Instant::now(), resume: false });
+            return self.switch_check();
+        };
+        if tab.kind == TabKind::Shell {
+            self.error = Some("Claude runs inside a terminal tab. Exit Claude there first, then switch.".into());
+            return Task::none();
+        }
+        if self.tab_status(tab) == "working" {
+            self.error = Some("Claude is still working. Wait until it finishes, then switch.".into());
+            return Task::none();
+        }
+        let (tab_id, pid) = (tab.id, tab.term.child_pid());
+        self.pending_switch = Some(PendingSwitch { sid, to, pid, started: Instant::now(), resume: true });
+        // Closing the tab stops Claude. The files move once it has exited.
+        let _ = self.close_tab(tab_id);
+        self.switch_check()
+    }
+
+    fn switch_check(&mut self) -> Task<Message> {
+        let Some(p) = &self.pending_switch else { return Task::none() };
+        if let Some(pid) = p.pid {
+            if self.scanner.is_running(pid) {
+                if p.started.elapsed() > SWITCH_TIMEOUT {
+                    self.pending_switch = None;
+                    self.error = Some("Claude did not stop, so the session was not moved.".into());
+                }
+                return Task::none();
+            }
+        }
+        let p = self.pending_switch.take().expect("checked above");
+        let moved = (|| {
+            let m = self.index.get(&p.sid).ok_or("The session file is gone.")?;
+            let from = self.config_of(m.account).ok_or("Unknown account.")?;
+            let to = self.config_of(p.to).ok_or("Unknown account.")?;
+            let backups = self.backup_dir.clone().ok_or("No folder for backups.")?;
+            codemux_core::accounts::move_session(&from, &to, &m.path, &backups).map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })();
+        self.refresh_index();
+        match moved {
+            Ok(()) => {
+                self.error = None;
+                if p.resume {
+                    return self.resume(p.sid);
+                }
+                self.selected = Selected::Session(p.sid);
+            }
+            Err(e) => self.error = Some(format!("Failed to move the session: {e}")),
+        }
+        Task::none()
     }
 
     fn close_tab(&mut self, id: u64) -> Task<Message> {
@@ -729,10 +980,11 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         let terms = self.tabs.iter().map(|t| t.term.subscription().map(Message::Terminal));
         Subscription::batch(
-            terms.chain([time::every(TICK).map(|_| Message::Tick), iced::event::listen_with(shortcut)]).chain(
+            terms
+                .chain([time::every(TICK).map(|_| Message::Tick), iced::event::listen_with(shortcut)])
                 // Follow the mouse only while dragging the divider.
-                self.resizing.then(|| iced::event::listen_with(resize_event)),
-            ),
+                .chain(self.resizing.then(|| iced::event::listen_with(resize_event)))
+                .chain(self.pending_switch.is_some().then(|| time::every(SWITCH_POLL).map(|_| Message::SwitchCheck))),
         )
     }
 
@@ -810,6 +1062,7 @@ impl App {
                 let (title, folder) = self.tab_title(tab);
                 let status = self.tab_status(tab);
                 TabRow {
+                    account: self.account_tag(self.tab_account(tab)),
                     id: tab.id,
                     session: tab.session_id.clone(),
                     workspace: tab.workspace,
@@ -860,6 +1113,7 @@ impl App {
                         item("New session", key("N"), Message::NewSession),
                         item("New terminal", key("T"), Message::NewTerminal),
                         item("New workspace", String::new(), Message::NewWorkspaceStart),
+                        item("Accounts", String::new(), Message::ShowAccounts),
                     ]
                     .spacing(2),
                 )
@@ -999,9 +1253,18 @@ impl App {
         list.into()
     }
 
+    /// Account name for a sidebar row. Empty for the default account, so a
+    /// user with one account sees no change.
+    fn account_tag(&self, account: u64) -> String {
+        if account == 0 { String::new() } else { self.account_name(account) }
+    }
+
     fn session_row(&self, m: &SessionMeta) -> Element<'static, Message> {
         let selected = self.selected == Selected::Session(m.id.clone());
-        button(row_label(self.session_title(m), false))
+        let label = row![row_label(self.session_title(m), false), account_tag(&self.account_tag(m.account))]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        button(label)
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })
@@ -1022,11 +1285,14 @@ impl App {
                         Some(sid) => self.title_or_rename(sid, title, 15, 12),
                         None => text(title).size(15).into(),
                     };
-                    let header = row![
-                        column![heading, text(info.join(" · ")).size(11)].width(Length::Fill),
-                        button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger),
-                    ]
-                    .padding(8);
+                    let mut header = row![column![heading, text(info.join(" · ")).size(11)].width(Length::Fill)]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
+                        .padding(8);
+                    if let Some(sid) = tab.session_id.as_ref().filter(|_| !self.accounts.is_empty() && tab.kind == TabKind::Claude) {
+                        header = header.push(self.account_picker(sid, self.tab_account(tab), 12));
+                    }
+                    let header = header.push(button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger));
                     column![header, rule::horizontal(1), term::TerminalView::show(&tab.term).map(Message::Terminal)]
                         .into()
                 }
@@ -1056,6 +1322,12 @@ impl App {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                     );
+                    if !self.accounts.is_empty() {
+                        col = col.push(self.account_picker(&m.id, m.account, TEXT_SIZE));
+                    }
+                    if let Some(p) = self.pending_switch.as_ref().filter(|p| p.sid == m.id) {
+                        col = col.push(text(format!("Moving to {}…", self.account_name(p.to))).size(TEXT_SIZE));
+                    }
                     let actions: Element<'_, Message> = if self.confirm_delete.as_deref() == Some(m.id.as_str()) {
                         row![
                             text("Delete this session file? This cannot be undone.").size(TEXT_SIZE),
@@ -1097,6 +1369,7 @@ impl App {
                 }
                 None => empty_state(),
             },
+            Selected::Accounts => self.accounts_view(),
             Selected::None => empty_state(),
         };
         let mut col = Column::new();
@@ -1111,6 +1384,70 @@ impl App {
 }
 
 impl App {
+    /// "Account: [picker]". Picking another account moves the session there.
+    fn account_picker(&self, sid: &str, current: u64, size: u32) -> Element<'_, Message> {
+        let choices = self.account_choices();
+        let selected = choices.iter().find(|c| c.id == current).cloned();
+        let sid = sid.to_string();
+        row![
+            text("Account:").size(size),
+            pick_list(choices, selected, move |c| Message::SwitchAccount(sid.clone(), c.id)).text_size(size),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    fn accounts_view(&self) -> Element<'_, Message> {
+        let folder = |p: Option<PathBuf>| text(p.map(|p| p.display().to_string()).unwrap_or_default()).size(SMALL_TEXT_SIZE);
+        let mut col = column![
+            text("Accounts").size(22),
+            text("Each account is its own Claude Code config folder, with its own login and sessions. \
+                  To continue a session with another account, pick the account in the session's view.")
+                .size(TEXT_SIZE),
+            container(column![text(DEFAULT_ACCOUNT).size(TEXT_SIZE), folder(self.config_of(0))].spacing(2))
+                .padding(8)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+        ]
+        .spacing(12);
+        for a in &self.accounts {
+            col = col.push(
+                container(
+                    row![
+                        column![text(a.name.clone()).size(TEXT_SIZE), folder(Some(a.config_dir.clone()))].spacing(2).width(Length::Fill),
+                        button(text("Log in").size(SMALL_TEXT_SIZE)).on_press(Message::AccountLogin(a.id)).style(button::secondary),
+                        button(text("Remove").size(SMALL_TEXT_SIZE)).on_press(Message::RemoveAccount(a.id)).style(button::danger),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding(8)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        col = col.push(match &self.new_account {
+            Some(name) => row![
+                text_input("Account name, for example Pro…", name)
+                    .id(iced::widget::Id::new(ACCOUNT_INPUT))
+                    .on_input(Message::NewAccountName)
+                    .on_submit(Message::NewAccountCreate)
+                    .size(TEXT_SIZE as f32),
+                button(text("Add and log in")).on_press(Message::NewAccountCreate),
+                button(text("Cancel")).on_press(Message::NewAccountCancel).style(button::secondary),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            None => Element::from(button(text("+ Add account")).on_press(Message::NewAccountStart)),
+        });
+        col = col.push(
+            text("Remove only forgets the account in Codemux. Its folder, login and sessions stay on disk.").size(SMALL_TEXT_SIZE),
+        );
+        container(scrollable(col.padding(24)).height(Length::Fill)).into()
+    }
+
     /// A session's title with a "Rename" button, or the name box while it is
     /// being renamed.
     fn title_or_rename(&self, sid: &str, title: String, size: u32, button_size: u32) -> Element<'_, Message> {
@@ -1188,6 +1525,8 @@ fn delete_workspace_confirm(id: u64, name: &str) -> Element<'static, Message> {
 /// rebuilds only when this text changes.
 #[derive(Clone, Hash)]
 struct TabRow {
+    /// Account name, shown only for accounts other than the default.
+    account: String,
     id: u64,
     session: Option<String>,
     workspace: Option<u64>,
@@ -1201,6 +1540,7 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
     let label = row![
         text("●").size(12).color(status_color(t.status)),
         row_label(t.title.clone(), true),
+        account_tag(&t.account),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
@@ -1249,6 +1589,20 @@ fn open_tab_style(theme: &iced::Theme, status: button::Status, selected: bool) -
 /// Details (folder, branch, time) show in the main area when selected.
 fn row_label(title: String, bold: bool) -> Element<'static, Message> {
     text(title).size(TEXT_SIZE).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
+}
+
+/// Small account name at the end of a sidebar row. Nothing when empty.
+fn account_tag(name: &str) -> Element<'static, Message> {
+    if name.is_empty() {
+        return row![].into();
+    }
+    container(text(name.to_string()).size(12))
+        .padding([1, 6])
+        .style(|theme: &iced::Theme| container::Style {
+            border: iced::border::rounded(4).color(theme.extended_palette().background.strong.color).width(1),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
@@ -1359,7 +1713,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let app = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        let app = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
         (dir, app)
     }
 
@@ -1446,7 +1800,7 @@ mod tests {
         assert!(!found_after_frames(&mut app, vec![], "+ New session"), "sidebar buttons still visible");
         assert!(found_after_frames(&mut app, vec![], "›"), "no button to show the sidebar again");
 
-        let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
         assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"), "not remembered");
         assert!(found_after_frames(&mut again, vec![Message::ToggleHideSidebar], "Fix webhook retry"));
     }
@@ -1468,7 +1822,7 @@ mod tests {
         for m in [Message::ResizeStart, Message::ResizeTo(450.0), Message::ResizeEnd] {
             let _ = app.update(m);
         }
-        let again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        let again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
         assert_eq!(again.sidebar_width, 450.0);
         assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
     }
@@ -1497,7 +1851,7 @@ mod tests {
         assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "Fix webhook retry"));
         let _ = app.update(Message::Search(String::new()));
 
-        let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
         assert!(found_after_frames(&mut again, vec![], "▸ Backend  (1)"), "not remembered");
         assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"));
 
@@ -1654,7 +2008,7 @@ mod tests {
         let _ = app.update(Message::Search(String::new()));
         assert_eq!(std::fs::read(&file).unwrap(), before, "session file changed");
 
-        let mut again = App::with_paths(Some(dir.path().join("projects")), Some(dir.path().join("state.json")));
+        let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
         assert!(found_after_frames(&mut again, vec![], "Webhook work"), "name not remembered");
 
         // A tab running the session shows the name too.
@@ -1698,6 +2052,118 @@ mod tests {
         // Restore the folder: the session comes back.
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
         assert!(found_after_frames(&mut app, vec![Message::Tick], "Fix webhook retry"));
+    }
+
+    fn add_pro(app: &mut App, dir: &std::path::Path) -> u64 {
+        app.home = dir.to_path_buf();
+        app.add_account("Pro").unwrap().unwrap()
+    }
+
+    fn s1_in(config: &std::path::Path) -> PathBuf {
+        config.join("projects/-tmp-proj/s1.jsonl")
+    }
+
+    /// The account list: an added account gets its own folder, shows in the
+    /// list and is remembered. Names must be unique. Remove only forgets it.
+    #[test]
+    fn accounts_can_be_added_and_removed() {
+        let (dir, mut app) = fixture();
+        let id = add_pro(&mut app, dir.path());
+        assert!(dir.path().join(".claude-pro").is_dir());
+        assert!(found_after_frames(&mut app, vec![Message::ShowAccounts], "Pro"), "account not listed");
+        assert!(app.add_account(" pro ").is_err(), "same name added twice");
+        assert!(app.add_account("Default").is_err());
+        assert_eq!(app.add_account("   "), Ok(None));
+
+        let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+        assert_eq!(again.accounts.len(), 1, "account not remembered");
+        let _ = again.update(Message::RemoveAccount(id));
+        assert!(again.accounts.is_empty());
+        assert!(dir.path().join(".claude-pro").is_dir(), "remove must not delete the folder");
+    }
+
+    /// Default → Pro → Default for a session that is not running. The file
+    /// moves each time, the sidebar shows the account, and the newest
+    /// conversation always comes along.
+    #[test]
+    fn switch_account_moves_a_stopped_session_and_back() {
+        let (dir, mut app) = fixture();
+        let pro = add_pro(&mut app, dir.path());
+        let pro_dir = dir.path().join(".claude-pro");
+        assert!(!found_after_frames(&mut app, vec![], "Pro"), "tag shown for the default account");
+
+        let msgs = vec![Message::SelectSession("s1".into()), Message::SwitchAccount("s1".into(), pro)];
+        assert!(found_after_frames(&mut app, msgs, "Pro"), "account tag missing in the sidebar");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(!s1_in(dir.path()).exists(), "still in the default account");
+        assert!(s1_in(&pro_dir).exists(), "not in the Pro account");
+        assert_eq!(app.index.get("s1").unwrap().account, pro);
+        assert_eq!(app.index.count(), 1, "session listed twice");
+
+        // Work done with Pro, then back to Default.
+        use std::io::Write;
+        let line = format!("{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"content\":\"done with pro\"}}}}\n", dir.path().join("work").display());
+        std::fs::OpenOptions::new().append(true).open(s1_in(&pro_dir)).unwrap().write_all(line.as_bytes()).unwrap();
+        let _ = app.update(Message::Tick);
+        let _ = app.update(Message::SwitchAccount("s1".into(), 0));
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(!s1_in(&pro_dir).exists());
+        assert!(std::fs::read_to_string(s1_in(dir.path())).unwrap().contains("done with pro"), "newest conversation lost");
+        assert_eq!(app.index.get("s1").unwrap().account, 0);
+        assert!(found_after_frames(&mut app, vec![], "done with pro"));
+    }
+
+    /// While Claude works, the switch is refused and nothing moves.
+    #[test]
+    fn switch_account_waits_while_claude_works() {
+        let (dir, mut app) = fixture();
+        let pro = add_pro(&mut app, dir.path());
+        let _ = app.update(Message::NewTerminal);
+        app.tabs[0].kind = TabKind::Claude;
+        app.tabs[0].session_id = Some("s1".into());
+        app.tabs[0].busy = Some(true);
+        let _ = app.update(Message::SwitchAccount("s1".into(), pro));
+        assert!(app.error.as_deref().unwrap_or_default().contains("still working"));
+        assert_eq!(app.tabs.len(), 1, "tab closed while Claude works");
+        assert!(s1_in(dir.path()).exists());
+    }
+
+    /// An idle running session: the tab is closed, the app waits for the real
+    /// process to exit, and only then moves the files.
+    #[test]
+    fn switch_account_stops_an_idle_tab_before_moving() {
+        let (dir, mut app) = fixture();
+        let pro = add_pro(&mut app, dir.path());
+        let _ = app.update(Message::NewTerminal);
+        let pid = app.tabs[0].term.child_pid().expect("no process");
+        app.tabs[0].kind = TabKind::Claude;
+        app.tabs[0].session_id = Some("s1".into());
+        app.tabs[0].busy = Some(false);
+
+        let _ = app.update(Message::SwitchAccount("s1".into(), pro));
+        assert!(app.tabs.is_empty(), "tab not closed");
+        // Resuming would start the real `claude`; only the move is tested here.
+        app.pending_switch.as_mut().expect("switch not pending").resume = false;
+        let start = Instant::now();
+        while app.pending_switch.is_some() && start.elapsed() < SWITCH_TIMEOUT {
+            std::thread::sleep(SWITCH_POLL);
+            let _ = app.update(Message::SwitchCheck);
+        }
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(!app.scanner.is_running(pid), "moved while the process still ran");
+        assert!(s1_in(&dir.path().join(".claude-pro")).exists());
+        assert_eq!(app.selected, Selected::Session("s1".into()));
+    }
+
+    /// Delete works for a session of another account too.
+    #[test]
+    fn delete_works_in_another_account() {
+        let (dir, mut app) = fixture();
+        let pro = add_pro(&mut app, dir.path());
+        let _ = app.update(Message::SwitchAccount("s1".into(), pro));
+        let _ = app.update(Message::DeleteConfirm("s1".into()));
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(!s1_in(&dir.path().join(".claude-pro")).exists());
     }
 }
 

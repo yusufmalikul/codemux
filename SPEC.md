@@ -299,6 +299,30 @@ Stored in the per-OS data folder (`directories` crate):
    - (Not yet) Also refuse if the session is detected running outside the app (section 7).
 4. After deleting, the session is gone from the sidebar and from "Previously open". It cannot be resumed anymore.
 
+### 11.7 Several Claude accounts
+
+Use case: one account hits its usage limit, and the user continues the same session with another account.
+
+1. **Account = config folder.** Each account is its own Claude Code config folder (`CLAUDE_CONFIG_DIR`), with its
+   own login and its own sessions. The default account is `~/.claude` (or the inherited `CLAUDE_CONFIG_DIR`).
+   Extra accounts live in `~/.claude-<name>` and are saved in `state.json`.
+2. **Launch.** Claude runs with `CLAUDE_CONFIG_DIR=<folder>` for an extra account. For the default account the
+   variable stays **unset**: Claude keys its saved login by this value, so setting it to `~/.claude` finds no login
+   (tested with Claude Code v2.1.300).
+3. **Adding.** "+" → Accounts → Add account. The app makes the folder (an existing one is used as it is) and opens a
+   tab that runs `claude auth login`. "Remove" only forgets the account; its folder stays on disk.
+4. **Sidebar.** One list for all accounts. Rows of an extra account show its name as a small tag. A new session
+   uses the account of the selected tab or session.
+5. **Switching.** The session view (and the tab header) has an "Account" picker. Picking another account:
+   - Refused while Claude works, or when Claude runs inside a "New terminal" tab (the user must exit it there).
+   - A Claude tab that waits for input is closed. The app waits until the process has exited (up to 10 seconds).
+   - The session files move to the other folder: `projects/<folder>/<id>.jsonl`, `projects/<folder>/<id>/` and
+     `file-history/<id>/`. First everything is copied under a temporary name (an error here changes nothing), then
+     put in place, then the originals move to `<app data>/moved-sessions/`, kept for 14 days.
+   - The session resumes with the new account. Switching back later moves the newest files back the same way.
+6. A session should be in one account only. If the same ID is found in two (a copy made by hand), the most recently
+   changed file is used.
+
 ## 12. Terminal widget (`crates/terminal`)
 
 Started from the `iced_term` 0.8 code (MIT). Attribution is in `NOTICE` and in the header of copied files.

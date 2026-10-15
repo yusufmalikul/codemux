@@ -27,6 +27,7 @@ Codemux keeps that list for you:
 - Shows which sessions are working, which are waiting for input, and which are old.
 - Runs Claude Code in a real terminal inside the app.
 - After a restart, the sessions that were open come back, and you can resume each with one click.
+- Works with several Claude accounts. When one account hits its limit, continue the same session with another.
 
 Codemux never sends your session files anywhere and never calls the Claude API.
 
