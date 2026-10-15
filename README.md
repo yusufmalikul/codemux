@@ -31,6 +31,62 @@ Codemux keeps that list for you:
 
 Codemux never sends your session files anywhere and never calls the Claude API.
 
+## Features
+
+### Sessions
+
+- **Sidebar with every session.** Sessions are grouped into Previously open, Today, Yesterday,
+  Last 7 days, Last 30 days and Older. Each row shows the title, project folder, branch and last activity time.
+- **Search** by title, folder, branch or last prompt.
+- **Status at a glance:** ● working, ◐ waiting for your input, ▸ plain shell, ○ not running.
+- **New session:** pick a folder and Claude starts there right away.
+- **Continue an old session** with one click (`claude --resume` under the hood).
+- **Rename** a session (a local label, only in Codemux).
+- **Delete** a session for good, after you confirm. A running session can't be deleted.
+
+### Workspaces
+
+- Make your own workspaces (named groups) and move sessions into them.
+- Fold or unfold each workspace. Delete a workspace without losing its sessions.
+
+### Terminal
+
+- A real terminal for each tab (built on `alacritty_terminal`), with full colors, mouse and scroll support.
+- **New terminal** opens your normal shell. If you run `claude` in it, Codemux finds the session by itself
+  and links the tab to it. `/clear` and `/resume` inside Claude are picked up too.
+- Many terminals stay open at once. Hidden tabs use almost no CPU.
+
+### Restart safe
+
+- The list of open sessions is saved on every change.
+- After you close the app, restart, or crash, the sessions that were open show up under **Previously open**.
+  Nothing starts by itself; click one to resume it.
+
+### Several Claude accounts
+
+- Add more Claude accounts. Each one has its own login and its own config folder (`~/.claude-<name>`).
+- **Switch account for a session:** when one account hits its usage limit, pick another account in the session
+  view and keep going in the same conversation. The session files move safely, and a backup is kept for 14 days.
+- **Shared config:** settings, keybindings, skills, agents, commands, rules, output styles and plugins are linked
+  to the Default account, so they are the same on every account. Logins and sessions stay per account.
+
+### Window
+
+- Resize the sidebar by dragging its edge, or hide it (⌘B) for privacy.
+- Dark theme.
+
+### Shortcuts
+
+| Action | macOS | Linux / Windows |
+|---|---|---|
+| New session | ⌘N | Ctrl+Shift+N |
+| New terminal | ⌘T | Ctrl+Shift+T |
+| Close tab | ⌘W | Ctrl+Shift+W |
+| Hide or show sidebar | ⌘B | Ctrl+Shift+B |
+| Go to session 1–9 | ⌘1–⌘9 | Ctrl+Shift+1–9 |
+
+App shortcuts never take keys that Claude Code needs in the terminal.
+
 ## Build and run
 
 You need [Rust](https://rustup.rs) (stable) and the `claude` CLI on your `PATH`.
