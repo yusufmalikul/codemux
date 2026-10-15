@@ -5,7 +5,7 @@ members = ["crates/core", "crates/terminal", "crates/app"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.4.1"
+version = "0.5.0"
 
 [workspace.dependencies]
 iced = { version = "=0.14.0", features = ["canvas", "lazy", "advanced", "tokio"] }
