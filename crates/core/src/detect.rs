@@ -96,9 +96,33 @@ impl ProcScanner {
     }
 }
 
-/// Pick the session file that a Claude process (started at `started` in `cwd`)
+/// The session a Claude process works on, as Claude Code itself says.
+/// While it runs, Claude keeps `<config>/sessions/<pid>.json` up to date with
+/// its session ID, also after /clear or /resume. The process may run with
+/// any account, so every config folder is checked. A file left by an older
+/// process with the same PID (after a crash) is ignored.
+pub fn session_of(config_dirs: &[PathBuf], proc_: &ClaudeProc) -> Option<String> {
+    let started_ms = proc_.started.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    config_dirs.iter().find_map(|d| {
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(d.join(format!("sessions/{}.json", proc_.pid))).ok()?).ok()?;
+        if v.get("pid")?.as_u64()? != u64::from(proc_.pid) {
+            return None;
+        }
+        // The process start time has 1 second precision; Claude writes its
+        // own start a little later.
+        if v.get("startedAt").and_then(|s| s.as_u64()).is_some_and(|s| s + 2000 < started_ms) {
+            return None;
+        }
+        Some(v.get("sessionId")?.as_str()?.to_string())
+    })
+}
+
+/// Guess the session file that a Claude process (started at `started` in `cwd`)
 /// is writing to: the most recently changed `.jsonl` in its project folder that
 /// changed after the process started and is not already taken by another tab.
+/// Only for Claude versions that do not write `sessions/<pid>.json` (see
+/// [`session_of`]): a file that another Claude in the same folder writes
+/// can be picked by mistake.
 /// The process may run with any account, so every projects folder is checked.
 pub fn match_session(projects_dirs: &[PathBuf], cwd: &Path, started: SystemTime, taken: &HashSet<String>) -> Option<String> {
     let folder = crate::paths::project_folder_name(cwd);
@@ -158,6 +182,28 @@ mod tests {
         assert_eq!(match_session(&[dir.path().to_path_buf()], cwd, start, &taken).as_deref(), Some("a"));
         // Nothing written yet after a later start.
         assert_eq!(match_session(&[dir.path().to_path_buf()], cwd, now + Duration::from_secs(60), &HashSet::new()), None);
+    }
+
+    #[test]
+    fn session_of_reads_claudes_pid_file() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let dirs = [a.path().to_path_buf(), b.path().to_path_buf()];
+        let started = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let proc_ = ClaudeProc { pid: 42, cwd: None, started };
+        assert_eq!(session_of(&dirs, &proc_), None);
+
+        // Written by a process that had the same PID before: ignored.
+        fs::create_dir_all(b.path().join("sessions")).unwrap();
+        let write = |sid: &str, started_ms: u64| {
+            fs::write(b.path().join("sessions/42.json"), format!(r#"{{"pid":42,"sessionId":"{sid}","startedAt":{started_ms}}}"#)).unwrap();
+        };
+        write("old", 900_000_000);
+        assert_eq!(session_of(&dirs, &proc_), None);
+
+        // Written by this process, in the second account's folder.
+        write("mine", 1_000_000_500);
+        assert_eq!(session_of(&dirs, &proc_).as_deref(), Some("mine"));
     }
 
     #[test]

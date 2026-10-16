@@ -554,7 +554,8 @@ impl App {
             return;
         }
         self.scanner.refresh();
-        let projects_dirs: Vec<PathBuf> = self.roots().into_iter().map(|r| r.projects_dir).collect();
+        let config_dirs: Vec<PathBuf> = std::iter::once(0).chain(self.accounts.iter().map(|a| a.id)).filter_map(|id| self.config_of(id)).collect();
+        let projects_dirs: Vec<PathBuf> = config_dirs.iter().map(|c| c.join("projects")).collect();
         let mut taken: HashSet<String> = self.tabs.iter().filter_map(|t| t.session_id.clone()).collect();
         for tab in self.tabs.iter_mut().filter(|t| t.kind == TabKind::Shell) {
             let Some(shell_pid) = tab.term.child_pid() else { continue };
@@ -576,7 +577,10 @@ impl App {
                 others.remove(own);
             }
             // Re-check every tick: /clear or /resume inside Claude switches the file.
-            if let Some(sid) = detect::match_session(&projects_dirs, &cwd, proc_.started, &others) {
+            // Ask Claude first. Guess from file times only if it does not say.
+            let sid = detect::session_of(&config_dirs, proc_)
+                .or_else(|| detect::match_session(&projects_dirs, &cwd, proc_.started, &others));
+            if let Some(sid) = sid {
                 if tab.session_id.as_deref() != Some(&sid) {
                     if let Some(old) = tab.session_id.replace(sid.clone()) {
                         taken.remove(&old);
@@ -615,10 +619,6 @@ impl App {
                     return self.close_tab(id);
                 }
             }
-            Message::WindowOpened => {
-                set_dock_icon();
-            }
-            Message::Tick => {
             Message::SidebarScrolled => {
                 self.sidebar_scrolled = Some(Instant::now());
             }
@@ -627,6 +627,10 @@ impl App {
                     self.sidebar_scrolled = None;
                 }
             }
+            Message::WindowOpened => {
+                set_dock_icon();
+            }
+            Message::Tick => {
                 self.refresh_index();
                 let before: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
                 self.detect();
@@ -1198,16 +1202,12 @@ impl App {
             );
         }
 
+        let scrolling = self.sidebar_scrolled.is_some();
         column![
             top,
             // Keep a small gap between the rows (and their close buttons) and the scrollbar.
             scrollable(list)
-        let scrolling = self.sidebar_scrolled.is_some();
                 .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(6)))
-                .height(Length::Fill),
-        ]
-        .spacing(8)
-        .into()
                 .on_scroll(|_| Message::SidebarScrolled)
                 .style(move |theme, status| {
                     let mut style = scrollable::default(theme, status);
@@ -1223,6 +1223,10 @@ impl App {
                     }
                     style
                 })
+                .height(Length::Fill),
+        ]
+        .spacing(8)
+        .into()
     }
 
     /// The sidebar tree: each workspace with its open tabs first, then its
@@ -2345,6 +2349,61 @@ mod tests {
         let _ = app.update(Message::DeleteConfirm("s1".into()));
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(!s1_in(&dir.path().join(".claude-pro")).exists());
+    }
+
+    /// Two Claudes in the same folder: one runs by hand in a terminal tab,
+    /// one in its own tab. Closing the second tab writes its session file
+    /// last. The terminal tab must keep its own session, not take that one.
+    #[cfg(unix)]
+    #[test]
+    fn terminal_tab_keeps_its_session_when_another_tab_closes() {
+        let (dir, mut app) = fixture();
+        let work = std::fs::canonicalize(dir.path().join("work")).unwrap();
+        let proj = dir.path().join("projects").join(paths::project_folder_name(&work));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::os::unix::fs::symlink("/bin/sleep", work.join("claude")).unwrap();
+
+        // The terminal tab: a shell that runs `claude` by hand.
+        let shell = LaunchSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "./claude 30; true".into()],
+            env: Default::default(),
+            cwd: work.clone(),
+        };
+        let _ = app.spawn(TabKind::Shell, shell, None, 0);
+        let start = Instant::now();
+        let pid = loop {
+            app.scanner.refresh();
+            if let Some(c) = app.scanner.find_claude_under(app.tabs[0].term.child_pid().unwrap()) {
+                break c.pid;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "claude not started");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // Like Claude Code: it says which session it writes to.
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        let started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        std::fs::write(
+            dir.path().join(format!("sessions/{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"mine","startedAt":{started_ms}}}"#),
+        )
+        .unwrap();
+        std::fs::write(proj.join("mine.jsonl"), "{}\n").unwrap();
+
+        // The other tab, in the same folder.
+        let other = LaunchSpec { program: "/bin/sleep".into(), args: vec!["30".into()], env: Default::default(), cwd: work.clone() };
+        let _ = app.spawn(TabKind::Claude, other, Some("other".into()), 0);
+        let other_tab = app.tabs[1].id;
+        std::fs::write(proj.join("other.jsonl"), "{}\n").unwrap();
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.tabs[0].session_id.as_deref(), Some("mine"));
+
+        // Close the other tab. Its Claude writes its file one last time.
+        let _ = app.update(Message::CloseTab(other_tab));
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(proj.join("other.jsonl")).unwrap().set_modified(later).unwrap();
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.tabs[0].session_id.as_deref(), Some("mine"), "terminal tab took the closed tab's session");
     }
 }
 
