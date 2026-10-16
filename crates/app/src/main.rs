@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(1500);
+/// How long the sidebar scrollbar stays visible after the last scroll.
+const SCROLLBAR_LINGER: Duration = Duration::from_millis(800);
 /// Output in the last 2 seconds means Claude is working (spec 7, fallback).
 const BUSY_WINDOW: Duration = Duration::from_secs(2);
 const HISTORY_LIMIT: usize = 300;
@@ -198,6 +200,8 @@ struct App {
     sidebar_width: f32,
     /// True while the user drags the sidebar divider.
     resizing: bool,
+    /// When the sidebar was last scrolled; the scrollbar shows only shortly after.
+    sidebar_scrolled: Option<Instant>,
     /// User-made workspaces (saved in state.json). Sessions in none of them
     /// are in the default workspace.
     workspaces: Vec<Workspace>,
@@ -244,6 +248,10 @@ impl std::fmt::Display for WorkspaceChoice {
 enum Message {
     Terminal(term::Event),
     Tick,
+    /// The sidebar list was scrolled.
+    SidebarScrolled,
+    /// Check whether the sidebar scrollbar should hide again.
+    SidebarScrollIdle,
     ToggleHideSidebar,
     /// Open or close the "+" menu in the sidebar.
     ToggleAddMenu,
@@ -343,6 +351,7 @@ impl App {
             hide_sidebar: state.hide_sidebar,
             sidebar_width: state.sidebar_width.unwrap_or(SIDEBAR_DEFAULT).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             resizing: false,
+            sidebar_scrolled: None,
             workspaces: state.workspaces,
             default_collapsed: state.default_collapsed,
             workspaces_version: 0,
@@ -610,6 +619,14 @@ impl App {
                 set_dock_icon();
             }
             Message::Tick => {
+            Message::SidebarScrolled => {
+                self.sidebar_scrolled = Some(Instant::now());
+            }
+            Message::SidebarScrollIdle => {
+                if self.sidebar_scrolled.is_some_and(|t| t.elapsed() >= SCROLLBAR_LINGER) {
+                    self.sidebar_scrolled = None;
+                }
+            }
                 self.refresh_index();
                 let before: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
                 self.detect();
@@ -1027,7 +1044,9 @@ impl App {
                 .chain([time::every(TICK).map(|_| Message::Tick), iced::event::listen_with(shortcut)])
                 // Follow the mouse only while dragging the divider.
                 .chain(self.resizing.then(|| iced::event::listen_with(resize_event)))
-                .chain(self.pending_switch.is_some().then(|| time::every(SWITCH_POLL).map(|_| Message::SwitchCheck))),
+                .chain(self.pending_switch.is_some().then(|| time::every(SWITCH_POLL).map(|_| Message::SwitchCheck)))
+                // Hide the sidebar scrollbar once scrolling stops.
+                .chain(self.sidebar_scrolled.is_some().then(|| time::every(Duration::from_millis(200)).map(|_| Message::SidebarScrollIdle))),
         )
     }
 
@@ -1183,11 +1202,27 @@ impl App {
             top,
             // Keep a small gap between the rows (and their close buttons) and the scrollbar.
             scrollable(list)
+        let scrolling = self.sidebar_scrolled.is_some();
                 .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(6)))
                 .height(Length::Fill),
         ]
         .spacing(8)
         .into()
+                .on_scroll(|_| Message::SidebarScrolled)
+                .style(move |theme, status| {
+                    let mut style = scrollable::default(theme, status);
+                    // Show the scrollbar only while scrolling, or when the mouse is on it.
+                    let on_bar = matches!(
+                        status,
+                        scrollable::Status::Hovered { is_vertical_scrollbar_hovered: true, .. }
+                            | scrollable::Status::Dragged { is_vertical_scrollbar_dragged: true, .. }
+                    );
+                    if !scrolling && !on_bar {
+                        style.vertical_rail.background = None;
+                        style.vertical_rail.scroller.background = iced::Color::TRANSPARENT.into();
+                    }
+                    style
+                })
     }
 
     /// The sidebar tree: each workspace with its open tabs first, then its
