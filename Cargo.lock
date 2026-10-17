@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "codemux"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "codemux-core",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "codemux-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "directories",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "codemux-terminal"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
