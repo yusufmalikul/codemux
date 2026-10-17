@@ -173,6 +173,7 @@ impl Backend {
         settings: BackendSettings,
     ) -> Result<Self> {
         let stop_grace = settings.stop_grace;
+        let config = term::Config { scrolling_history: settings.scrollback, ..term::Config::default() };
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(settings.program, settings.args)),
             working_directory: settings.working_directory,
@@ -180,7 +181,6 @@ impl Backend {
             ..tty::Options::default()
         };
 
-        let config = term::Config::default();
         let terminal_size = TerminalSize::default();
         let pty = tty::new(&pty_config, terminal_size.into(), id)?;
         #[cfg(unix)]
@@ -898,6 +898,31 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Scrollback stops at the configured number of lines, so a terminal
+    /// that prints a lot does not keep growing.
+    #[test]
+    fn scrollback_is_limited() {
+        let (tx, mut rx) = mpsc::channel(100);
+        std::thread::spawn(move || while rx.blocking_recv().is_some() {});
+        let settings = BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "seq 1 2000; sleep 30".into()],
+            scrollback: 100,
+            ..Default::default()
+        };
+        let backend = Backend::new(0, tx, settings).unwrap();
+        let start = Instant::now();
+        while backend.term.lock().grid().history_size() < 100 {
+            assert!(start.elapsed() < Duration::from_secs(5), "output not seen");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Give the rest of the output time to arrive; the history must not grow past the limit.
+        std::thread::sleep(Duration::from_millis(300));
+        let term = backend.term.lock();
+        assert_eq!(term.grid().history_size(), 100);
+        assert!(term.grid().total_lines() >= 100 + term.grid().screen_lines());
     }
 
     /// Copy reads the selection from the live terminal (no grid copy kept).

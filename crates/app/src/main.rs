@@ -22,15 +22,21 @@ fn main() -> iced::Result {
         .run()
 }
 
-/// The app runs as a plain binary, not a `.app` bundle, so macOS has no icon
-/// file to read. Set the Dock icon at runtime instead.
+/// Run as a plain binary (`cargo run`), macOS has no icon file to read, so
+/// set the Dock icon at runtime. Inside the `.app` bundle made by
+/// scripts/install-macos.sh, the bundle's own .icns is used and nothing is
+/// done here: a runtime NSImage costs memory for as long as the app runs
+/// (the 1024 px icon took over 30 MB), and the 256 px one is enough for the Dock.
 #[cfg(target_os = "macos")]
 fn set_dock_icon() {
     use objc2::{AllocAnyThread, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
+    if runs_from_app_bundle() {
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else { return };
-    let data = NSData::with_bytes(include_bytes!("../assets/icon.png"));
+    let data = NSData::with_bytes(include_bytes!("../assets/icon-256.png"));
     if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
         unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
     }
@@ -38,6 +44,12 @@ fn set_dock_icon() {
 
 #[cfg(not(target_os = "macos"))]
 fn set_dock_icon() {}
+
+/// True inside a macOS `.app` bundle, where the binary lives in `Contents/MacOS/`.
+#[cfg(target_os = "macos")]
+fn runs_from_app_bundle() -> bool {
+    std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str() == "Contents") && p.parent().is_some_and(|d| d.ends_with("Contents/MacOS")))
+}
 
 fn window_settings() -> iced::window::Settings {
     iced::window::Settings {

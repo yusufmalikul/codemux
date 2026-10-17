@@ -27,6 +27,12 @@ pub struct BackendSettings {
     /// How long the program gets to exit after SIGHUP, when the terminal
     /// closes, before it is killed.
     pub stop_grace: Duration,
+    /// Lines kept above the screen for scrolling back. Every line costs
+    /// memory for each column (about 24 bytes per cell), so 10,000 lines at
+    /// 200 columns would be ~50 MB per terminal. Claude Code redraws a lot,
+    /// so its scrollback fills up fast. The full conversation is in the
+    /// session file anyway.
+    pub scrollback: usize,
 }
 
 impl Default for BackendSettings {
@@ -37,6 +43,7 @@ impl Default for BackendSettings {
             env: HashMap::new(),
             working_directory: None,
             stop_grace: Duration::from_secs(3),
+            scrollback: 3000,
         }
     }
 }
