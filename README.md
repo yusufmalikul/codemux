@@ -39,6 +39,8 @@ Codemux never sends your session files anywhere and never calls the Claude API.
   Last 7 days, Last 30 days and Older. Each row shows the title, project folder, branch and last activity time.
 - **Search** by title, folder, branch or last prompt.
 - **Status at a glance:** ● working, ◐ waiting for your input, ▸ plain shell, ○ not running.
+- **Notification when Claude waits.** When Claude finishes or asks you something in a tab you are not
+  looking at, or while the window is in the background, you get a system notification.
 - **New session:** pick a folder and Claude starts there right away.
 - **Continue an old session** with one click (`claude --resume` under the hood).
 - **Rename** a session (a local label, only in Codemux).
@@ -55,6 +57,7 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 - **New terminal** opens your normal shell. If you run `claude` in it, Codemux finds the session by itself
   and links the tab to it. `/clear` and `/resume` inside Claude are picked up too.
 - Many terminals stay open at once. Hidden tabs use almost no CPU.
+- Session files are read on a background thread, so the window opens at once and never waits for disk.
 
 ### Restart safe
 

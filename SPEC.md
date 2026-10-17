@@ -484,6 +484,7 @@ Not yet (put off on purpose):
 
 1. App name and repo name?
 2. License: the repo uses MIT right now (`LICENSE` file). Keep MIT, or MIT OR Apache-2.0?
-3. OS notification when a session waits for input: v1 or v2?
+3. ~~OS notification when a session waits for input: v1 or v2?~~ Done in 0.8.0: a tab whose Claude goes
+   from working to waiting shows a system notification, unless that tab is on screen in a focused window.
 4. Closing the app: stop all `claude` processes, or ask first if one is working?
 5. Do we need a feature to export session content (for example to Markdown)?

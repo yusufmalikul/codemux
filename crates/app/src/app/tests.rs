@@ -266,6 +266,56 @@ fn idle_redraw_does_not_show_working() {
     assert_eq!(app.tab_status(&app.tabs[0]), "working", "spinner title not shown as working");
 }
 
+/// When Claude finishes and waits for input, the user gets an OS
+/// notification, unless they are looking at that tab in a focused window.
+#[test]
+fn waiting_claude_notifies_unless_the_tab_is_on_screen() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    app.tabs[0].kind = TabKind::Claude;
+    let id = app.tabs[0].id;
+    let title = |t: &str| Message::Terminal(term::Event::BackendCall(id, term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Title(t.into()))));
+
+    // The tab is selected and the window has focus: no notification.
+    let _ = app.update(title("◐ Fix webhook"));
+    let _ = app.update(title("✳ Fix webhook"));
+    assert!(app.notified.is_empty(), "notified while the tab was on screen");
+
+    // Looking at something else.
+    let _ = app.update(Message::SelectSession("s1".into()));
+    let _ = app.update(title("◐ Fix webhook"));
+    assert!(app.notified.is_empty(), "notified while working");
+    let _ = app.update(title("✳ Fix webhook"));
+    assert_eq!(app.notified.len(), 1, "no notification for a hidden tab");
+    assert!(app.notified[0].body.contains("waiting for your input"), "{:?}", app.notified[0]);
+    assert_eq!(app.notified[0].title, app.tab_title(&app.tabs[0]).0);
+
+    // Idle redraws must not notify again.
+    let _ = app.update(title("✳ Fix webhook"));
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.notified.len(), 1, "notified again without new work");
+
+    // The tab is on screen, but the window is in the background.
+    let _ = app.update(Message::SelectTab(id));
+    let _ = app.update(Message::WindowFocused(false));
+    let _ = app.update(title("◐ Fix webhook"));
+    let _ = app.update(title("✳ Fix webhook"));
+    assert_eq!(app.notified.len(), 2, "no notification for an unfocused window");
+}
+
+/// A plain shell has no Claude to wait for, so it never notifies.
+#[test]
+fn shell_tab_never_notifies() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    let _ = app.update(Message::SelectSession("s1".into()));
+    app.tabs[0].last_output = Instant::now();
+    let _ = app.update(Message::Tick);
+    app.tabs[0].last_output = Instant::now() - BUSY_WINDOW * 5;
+    let _ = app.update(Message::Tick);
+    assert!(app.notified.is_empty());
+}
+
 /// The ✕ on a workspace only asks first. Cancel keeps it; Delete removes it.
 #[test]
 fn delete_workspace_asks_for_confirmation() {

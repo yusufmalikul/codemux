@@ -4,6 +4,7 @@
 mod accounts;
 mod detail;
 mod sidebar;
+mod notify;
 mod workspaces;
 #[cfg(test)]
 mod tests;
@@ -101,6 +102,8 @@ struct Tab {
     last_output: Instant,
     /// Busy or idle, read from the title Claude sets. None until Claude sets one.
     busy: Option<bool>,
+    /// Status at the last check, to notice when Claude starts waiting (notify.rs).
+    last_status: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +156,12 @@ pub(crate) struct App {
     /// Tests record resumes here instead of starting the real `claude`.
     #[cfg(test)]
     resumed: Vec<LaunchSpec>,
+    /// Tests record OS notifications here instead of showing them.
+    #[cfg(test)]
+    notified: Vec<notify::Alert>,
+    /// The window has keyboard focus. A tab on screen in a focused window
+    /// needs no notification.
+    window_focused: bool,
     scanner: ProcScanner,
     state_path: Option<PathBuf>,
     /// Sessions that were open when the app last ran (spec 11.4).
@@ -208,6 +217,8 @@ pub(crate) enum Message {
     ResizeEnd,
     /// The window is up; macOS resets the Dock icon during launch, so set it now.
     WindowOpened,
+    /// The window got or lost keyboard focus.
+    WindowFocused(bool),
     NewSession,
     FolderPicked(Option<PathBuf>),
     NewTerminal,
@@ -278,6 +289,8 @@ fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::win
     match event {
         iced::Event::Window(iced::window::Event::Rescaled(scale)) => return Some(Message::ScaleFactor(scale)),
         iced::Event::Window(iced::window::Event::Opened { .. }) => return Some(Message::WindowOpened),
+        iced::Event::Window(iced::window::Event::Focused) => return Some(Message::WindowFocused(true)),
+        iced::Event::Window(iced::window::Event::Unfocused) => return Some(Message::WindowFocused(false)),
         _ => {}
     }
     let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else { return None };
@@ -322,6 +335,7 @@ impl App {
         let scale = iced::window::latest()
             .and_then(iced::window::scale_factor)
             .map(Message::ScaleFactor);
+        notify::prepare();
         let mut app = Self::with_paths(paths::claude_dir(), state_path);
         // Read the session files in the background, so the window opens at once.
         let load = app.refresh_index_in_background();
@@ -336,7 +350,7 @@ impl App {
         if let Some(dir) = &backup_dir {
             codemux_core::accounts::prune_backups(dir, MOVE_BACKUP_AGE);
         }
-        let app = Self {
+        Self {
             tabs: Vec::new(),
             selected: Selected::None,
             next_id: 0,
@@ -353,6 +367,9 @@ impl App {
             home: paths::home_dir().unwrap_or_else(|| PathBuf::from(".")),
             #[cfg(test)]
             resumed: Vec::new(),
+            #[cfg(test)]
+            notified: Vec::new(),
+            window_focused: true,
             scanner: ProcScanner::default(),
             state_path,
             previously_open,
@@ -372,8 +389,7 @@ impl App {
             add_menu: false,
             session_names: state.session_names,
             renaming: None,
-        };
-        app
+        }
     }
 
     /// Read the session files on this thread. For user actions that must
@@ -400,7 +416,7 @@ impl App {
         #[cfg(test)]
         {
             // Tests drive the app one message at a time, so do the work here.
-            return self.update(Message::IndexRefreshed(gen, refresh_job(index, &roots)));
+            self.update(Message::IndexRefreshed(gen, refresh_job(index, &roots)))
         }
         #[cfg(not(test))]
         {
@@ -459,6 +475,7 @@ impl App {
                     workspace,
                     last_output: Instant::now(),
                     busy: None,
+                    last_status: None,
                 });
                 self.selected = Selected::Tab(id);
                 self.adopt_tab_sessions();
@@ -563,6 +580,14 @@ impl App {
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        // Every message can change a tab's status (a title, the timer, a
+        // focus change), so check after each one.
+        self.notify_waiting();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         if matches!(message, Message::NewSession | Message::NewTerminal | Message::NewWorkspaceStart | Message::ShowAccounts) {
             self.add_menu = false;
         }
@@ -601,6 +626,7 @@ impl App {
             Message::WindowOpened => {
                 crate::set_dock_icon();
             }
+            Message::WindowFocused(focused) => self.window_focused = focused,
             Message::Tick => {
                 let load = self.refresh_index_in_background();
                 let before: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
