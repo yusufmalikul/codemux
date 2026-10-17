@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const TITLE_MAX: usize = 80;
@@ -245,7 +246,11 @@ pub fn delete_session(projects_dir: &Path, path: &Path) -> std::io::Result<()> {
 /// It reads the projects folder of every account. A session should be in
 /// one account only, but a copy made by hand can put the same ID in two.
 /// Then only the most recently changed file counts.
-#[derive(Default)]
+///
+/// Cloning is cheap (each session's data is shared until it changes), so
+/// the app can hand a copy to a background thread for `refresh` while it
+/// keeps showing the current one.
+#[derive(Debug, Clone, Default)]
 pub struct Index {
     entries: HashMap<PathBuf, Entry>,
     by_id: HashMap<String, PathBuf>,
@@ -258,9 +263,10 @@ pub struct Root {
     pub projects_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
 struct Entry {
     offset: u64,
-    meta: SessionMeta,
+    meta: Arc<SessionMeta>,
     /// The session's folder still exists. A session whose folder was deleted
     /// cannot be resumed, so it is not listed.
     cwd_exists: bool,
@@ -342,7 +348,7 @@ impl Index {
 
         let Ok(md) = fs::metadata(path) else { return false };
         let len = md.len();
-        let fresh = |id: String| SessionMeta { id, path: path.to_path_buf(), account, ..Default::default() };
+        let fresh = |id: String| Arc::new(SessionMeta { id, path: path.to_path_buf(), account, ..Default::default() });
         let entry = self.entries.entry(path.to_path_buf()).or_insert_with(|| Entry {
             offset: 0,
             cwd_exists: false,
@@ -368,21 +374,22 @@ impl Index {
         // Only consume complete lines. A half-written last line is read next time.
         let Some(end) = buf.iter().rposition(|&b| b == b'\n') else { return false };
         let chunk = String::from_utf8_lossy(&buf[..=end]);
+        let meta = Arc::make_mut(&mut entry.meta);
         for line in chunk.lines() {
-            apply_line(&mut entry.meta, line);
+            apply_line(meta, line);
         }
+        meta.modified = md.modified().ok();
         entry.offset += end as u64 + 1;
-        entry.meta.modified = md.modified().ok();
         true
     }
 
     pub fn get(&self, id: &str) -> Option<&SessionMeta> {
-        self.by_id.get(id).and_then(|p| self.entries.get(p)).map(|e| &e.meta)
+        self.by_id.get(id).and_then(|p| self.entries.get(p)).map(|e| &*e.meta)
     }
 
     /// Like `get`, but only for a session that `sessions()` lists.
     pub fn listed(&self, id: &str) -> Option<&SessionMeta> {
-        self.by_id.get(id).and_then(|p| self.entries.get(p)).filter(|e| e.listed()).map(|e| &e.meta)
+        self.by_id.get(id).and_then(|p| self.entries.get(p)).filter(|e| e.listed()).map(|e| &*e.meta)
     }
 
     /// Number of sessions that `sessions()` returns.
@@ -394,8 +401,8 @@ impl Index {
     /// newest first.
     pub fn sessions(&self) -> Vec<&SessionMeta> {
         let mut list: Vec<_> =
-            self.entries.iter().filter(|(p, e)| e.listed() && self.is_current(p, e)).map(|(_, e)| &e.meta).collect();
-        list.sort_by(|a, b| b.sort_time().cmp(&a.sort_time()));
+            self.entries.iter().filter(|(p, e)| e.listed() && self.is_current(p, e)).map(|(_, e)| &*e.meta).collect();
+        list.sort_by_key(|m| std::cmp::Reverse(m.sort_time()));
         list
     }
 }

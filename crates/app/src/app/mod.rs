@@ -131,6 +131,11 @@ pub(crate) struct App {
     index: Index,
     /// Bumped when the index changes, so the lazy sidebar knows to rebuild.
     index_version: u64,
+    /// A background refresh of the index is running (see refresh_index_in_background).
+    index_refreshing: bool,
+    /// Bumped by every refresh done on this thread. A background result that
+    /// started from an older index is thrown away.
+    index_gen: u64,
     /// Config folder of the default account (`~/.claude`).
     default_config: Option<PathBuf>,
     /// Extra accounts (saved in state.json).
@@ -187,6 +192,9 @@ pub(crate) struct App {
 pub(crate) enum Message {
     Terminal(term::Event),
     Tick,
+    /// A background refresh finished: the index it started from (by
+    /// generation) and the new index, if anything changed.
+    IndexRefreshed(u64, Option<Index>),
     /// The sidebar list was scrolled.
     SidebarScrolled,
     /// Check whether the sidebar scrollbar should hide again.
@@ -245,6 +253,11 @@ pub(crate) enum Message {
     SwitchAccount(String, u64),
     /// Check if the stopped Claude of a pending switch has exited.
     SwitchCheck,
+}
+
+/// The work of a background refresh. Some(index) when anything changed.
+fn refresh_job(mut index: Index, roots: &[Root]) -> Option<Index> {
+    index.refresh(roots).then_some(index)
 }
 
 fn folder_label(p: &std::path::Path) -> String {
@@ -309,7 +322,10 @@ impl App {
         let scale = iced::window::latest()
             .and_then(iced::window::scale_factor)
             .map(Message::ScaleFactor);
-        (Self::with_paths(paths::claude_dir(), state_path), scale)
+        let mut app = Self::with_paths(paths::claude_dir(), state_path);
+        // Read the session files in the background, so the window opens at once.
+        let load = app.refresh_index_in_background();
+        (app, Task::batch([scale, load]))
     }
 
     /// `default_config` is the default account's Claude config folder.
@@ -320,12 +336,14 @@ impl App {
         if let Some(dir) = &backup_dir {
             codemux_core::accounts::prune_backups(dir, MOVE_BACKUP_AGE);
         }
-        let mut app = Self {
+        let app = Self {
             tabs: Vec::new(),
             selected: Selected::None,
             next_id: 0,
             index: Index::default(),
             index_version: 0,
+            index_refreshing: false,
+            index_gen: 0,
             default_config,
             accounts: state.accounts,
             unshared: HashMap::new(),
@@ -355,13 +373,42 @@ impl App {
             session_names: state.session_names,
             renaming: None,
         };
-        app.refresh_index();
         app
     }
 
+    /// Read the session files on this thread. For user actions that must
+    /// show their result at once (delete, move). The timer uses
+    /// refresh_index_in_background instead.
     fn refresh_index(&mut self) {
+        self.index_gen += 1;
         if self.index.refresh(&self.roots()) {
             self.index_version += 1;
+        }
+    }
+
+    /// Read the session files on another thread, so the window never waits
+    /// for disk. Reading a copy of the index means the sidebar keeps showing
+    /// the current one meanwhile. The result comes back as
+    /// Message::IndexRefreshed. Nothing starts while a refresh still runs.
+    fn refresh_index_in_background(&mut self) -> Task<Message> {
+        if self.index_refreshing {
+            return Task::none();
+        }
+        self.index_refreshing = true;
+        let gen = self.index_gen;
+        let (index, roots) = (self.index.clone(), self.roots());
+        #[cfg(test)]
+        {
+            // Tests drive the app one message at a time, so do the work here.
+            return self.update(Message::IndexRefreshed(gen, refresh_job(index, &roots)));
+        }
+        #[cfg(not(test))]
+        {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(refresh_job(index, &roots));
+            });
+            Task::perform(rx, move |r| Message::IndexRefreshed(gen, r.ok().flatten()))
         }
     }
 
@@ -555,13 +602,25 @@ impl App {
                 crate::set_dock_icon();
             }
             Message::Tick => {
-                self.refresh_index();
+                let load = self.refresh_index_in_background();
                 let before: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
                 self.detect();
                 self.adopt_tab_sessions();
                 let after: Vec<_> = self.tabs.iter().map(|t| t.session_id.clone()).collect();
                 if before != after {
                     self.save_state();
+                }
+                return load;
+            }
+            Message::IndexRefreshed(gen, index) => {
+                self.index_refreshing = false;
+                // A refresh on this thread ran meanwhile: that index is newer.
+                if gen != self.index_gen {
+                    return Task::none();
+                }
+                if let Some(index) = index {
+                    self.index = index;
+                    self.index_version += 1;
                 }
             }
             Message::NewSession => {

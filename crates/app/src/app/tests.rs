@@ -16,8 +16,16 @@ fn fixture() -> (tempfile::TempDir, App) {
         ),
     )
     .unwrap();
-    let app = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+    let app = reopen(dir.path());
     (dir, app)
+}
+
+/// Start the app on a config folder and wait for its first read of the
+/// session files, as the user would.
+fn reopen(dir: &std::path::Path) -> App {
+    let mut app = App::with_paths(Some(dir.to_path_buf()), Some(dir.join("state.json")));
+    app.refresh_index();
+    app
 }
 
 /// Build the UI for several frames with a shared cache, like the real
@@ -103,7 +111,7 @@ fn hide_sidebar_collapses_it_and_is_remembered() {
     assert!(!found_after_frames(&mut app, vec![], "+ New session"), "sidebar buttons still visible");
     assert!(found_after_frames(&mut app, vec![], "›"), "no button to show the sidebar again");
 
-    let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+    let mut again = reopen(dir.path());
     assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"), "not remembered");
     assert!(found_after_frames(&mut again, vec![Message::ToggleHideSidebar], "Fix webhook retry"));
 }
@@ -125,7 +133,7 @@ fn sidebar_resize_is_clamped_and_remembered() {
     for m in [Message::ResizeStart, Message::ResizeTo(450.0), Message::ResizeEnd] {
         let _ = app.update(m);
     }
-    let again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+    let again = reopen(dir.path());
     assert_eq!(again.sidebar_width, 450.0);
     assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
 }
@@ -154,7 +162,7 @@ fn workspaces_group_sessions_as_a_collapsible_tree() {
     assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "Fix webhook retry"));
     let _ = app.update(Message::Search(String::new()));
 
-    let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+    let mut again = reopen(dir.path());
     assert!(found_after_frames(&mut again, vec![], "▸ Backend  (1)"), "not remembered");
     assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"));
 
@@ -311,7 +319,7 @@ fn rename_session_shows_new_name_and_is_remembered() {
     let _ = app.update(Message::Search(String::new()));
     assert_eq!(std::fs::read(&file).unwrap(), before, "session file changed");
 
-    let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+    let mut again = reopen(dir.path());
     assert!(found_after_frames(&mut again, vec![], "Webhook work"), "name not remembered");
 
     // A tab running the session shows the name too.
@@ -340,6 +348,31 @@ fn sidebar_shows_history_sessions() {
     assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"), "session not visible");
     assert!(found_after_frames(&mut app, vec![], "TODAY"), "time group not visible");
     assert_eq!(app.search_placeholder(), "Search 1 session…", "session count not shown");
+}
+
+/// The session files are read on another thread. A result that started
+/// from an index older than the one on screen (a delete ran meanwhile) is
+/// thrown away, and only one refresh runs at a time.
+#[test]
+fn background_index_results_are_applied_in_order() {
+    let (dir, mut app) = fixture();
+    let old = app.index.clone();
+    let gen = app.index_gen;
+    let _ = app.update(Message::DeleteConfirm("s1".into()));
+    assert!(app.index.get("s1").is_none());
+    let _ = app.update(Message::IndexRefreshed(gen, Some(old)));
+    assert!(app.index.get("s1").is_none(), "stale background result brought the deleted session back");
+
+    // While a refresh runs, the timer does not start another one.
+    let s2 = dir.path().join("projects/-tmp-proj/s2.jsonl");
+    std::fs::write(&s2, format!("{{\"type\":\"user\",\"sessionId\":\"s2\",\"cwd\":\"{}\",\"message\":{{\"content\":\"second\"}}}}\n", dir.path().join("work").display())).unwrap();
+    app.index_refreshing = true;
+    let _ = app.update(Message::Tick);
+    assert!(app.index.get("s2").is_none(), "second refresh started while one ran");
+    let _ = app.update(Message::IndexRefreshed(app.index_gen, None));
+    assert!(!app.index_refreshing);
+    let _ = app.update(Message::Tick);
+    assert!(app.index.get("s2").is_some(), "refresh did not run after the last one finished");
 }
 
 /// A session whose folder was deleted cannot be resumed, so it must
@@ -378,7 +411,7 @@ fn accounts_can_be_added_and_removed() {
     assert!(app.add_account("Default").is_err());
     assert_eq!(app.add_account("   "), Ok(None));
 
-    let mut again = App::with_paths(Some(dir.path().to_path_buf()), Some(dir.path().join("state.json")));
+    let mut again = reopen(dir.path());
     assert_eq!(again.accounts.len(), 1, "account not remembered");
     let _ = again.update(Message::RemoveAccount(id));
     assert!(again.accounts.is_empty());
