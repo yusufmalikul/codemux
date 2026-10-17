@@ -14,8 +14,8 @@ path = "src/main.rs"
 codemux-core = { path = "../core" }
 codemux-terminal = { path = "../terminal" }
 iced.workspace = true
-png = "0.18"
-rfd = "0.15"
+# Folder picker. Default features pull in async-std; we already run on tokio through iced.
+rfd = { version = "0.15", default-features = false, features = ["tokio", "xdg-portal"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 notify-rust = "4.18.2"
 
@@ -27,6 +27,10 @@ tempfile = "3"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+# Decodes the window icon. macOS takes its icon from the .app bundle or NSImage instead.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+png = "0.18"
 
 # Only used when building on Windows (see build.rs).
 [target.'cfg(windows)'.build-dependencies]

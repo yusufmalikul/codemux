@@ -55,7 +55,8 @@ fn window_settings() -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(1280.0, 800.0),
         // macOS takes the Dock icon from set_dock_icon. Windows and X11 show this one.
-        icon: if cfg!(target_os = "macos") { None } else { window_icon() },
+        #[cfg(not(target_os = "macos"))]
+        icon: window_icon(),
         // Wayland finds the icon through the .desktop file with this name
         // (scripts/install-linux.sh).
         #[cfg(target_os = "linux")]
@@ -67,6 +68,7 @@ fn window_settings() -> iced::window::Settings {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn window_icon() -> Option<iced::window::Icon> {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon-256.png")));
     let mut reader = decoder.read_info().ok()?;
@@ -79,7 +81,7 @@ fn window_icon() -> Option<iced::window::Icon> {
     iced::window::icon::from_rgba(buf, info.width, info.height).ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 

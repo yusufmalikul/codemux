@@ -280,16 +280,13 @@ fn build_ansi256_colors() -> HashMap<u8, Color> {
     ansi256_colors
 }
 
-fn hex_to_color(hex: &str) -> anyhow::Result<Color> {
-    if hex.len() != 7 {
-        return Err(anyhow::format_err!("input string is in non valid format"));
+/// Parses a `#rrggbb` string. Errors with the bad input, so a wrong palette entry is easy to spot.
+fn hex_to_color(hex: &str) -> Result<Color, String> {
+    let channel = |range| u8::from_str_radix(hex.get(range).unwrap_or(""), 16).map_err(|_| format!("not a #rrggbb color: {hex:?}"));
+    if hex.len() != 7 || !hex.starts_with('#') {
+        return Err(format!("not a #rrggbb color: {hex:?}"));
     }
-
-    let r = u8::from_str_radix(&hex[1..3], 16)?;
-    let g = u8::from_str_radix(&hex[3..5], 16)?;
-    let b = u8::from_str_radix(&hex[5..7], 16)?;
-
-    Ok(Color::from_rgb8(r, g, b))
+    Ok(Color::from_rgb8(channel(1..3)?, channel(3..5)?, channel(5..7)?))
 }
 
 impl TerminalStyle for Theme {
