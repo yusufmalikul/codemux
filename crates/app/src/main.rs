@@ -1205,9 +1205,10 @@ impl App {
         let scrolling = self.sidebar_scrolled.is_some();
         column![
             top,
-            // Keep a small gap between the rows (and their close buttons) and the scrollbar.
+            // A thin scrollbar with a small gap, so the rows (and their close
+            // buttons) keep most of the sidebar width.
             scrollable(list)
-                .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(6)))
+                .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)))
                 .on_scroll(|_| Message::SidebarScrolled)
                 .style(move |theme, status| {
                     let mut style = scrollable::default(theme, status);
