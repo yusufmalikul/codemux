@@ -4,7 +4,10 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-cargo build --release -p codemux
+# wgpu 27 (the GPU backend iced 0.14 uses) still depends on the old `block` crate, which
+# trips a "will be rejected by a future version of Rust" notice. Nothing in this repo can
+# change that until iced moves to a newer wgpu, so keep the notice out of the install output.
+CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY=never cargo build --release -p codemux
 
 version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
 out=target/release/bundle
