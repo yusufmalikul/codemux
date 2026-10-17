@@ -702,3 +702,15 @@ fn terminal_tab_keeps_its_session_when_another_tab_closes() {
     let _ = app.update(Message::Tick);
     assert_eq!(app.tabs[0].session_id.as_deref(), Some("mine"), "terminal tab took the closed tab's session");
 }
+
+/// The error banner has a ✕ button. Pressing it hides the message.
+#[test]
+fn error_banner_can_be_dismissed() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::DeleteConfirm("missing".into()));
+    assert!(app.error.is_some());
+    assert!(found_after_frames(&mut app, vec![], "Session tidak ditemukan."));
+    let _ = app.update(Message::DismissError);
+    assert!(app.error.is_none());
+    assert!(!found_after_frames(&mut app, vec![], "Session tidak ditemukan."));
+}

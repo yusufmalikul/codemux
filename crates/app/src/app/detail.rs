@@ -2,7 +2,7 @@
 //! closed session.
 
 use super::*;
-use super::sidebar::relative_time;
+use super::sidebar::{close_style, relative_time};
 use iced::widget::column;
 
 fn empty_state<'a>() -> Element<'a, Message> {
@@ -115,7 +115,14 @@ impl App {
         };
         let mut col = Column::new();
         if let Some(e) = &self.error {
-            col = col.push(container(text(e.clone()).size(12)).padding(8).style(container::danger));
+            // Red banner with a ✕ at the end, so the user can clear it.
+            let banner = row![
+                text(e.clone()).size(12).width(Length::Fill),
+                button(text("✕").size(12)).padding([0, 6]).on_press(Message::DismissError).style(close_style),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+            col = col.push(container(banner).padding(8).width(Length::Fill).style(container::danger));
         }
         // Own row under the body, so it never covers terminal text.
         let credit = container(text("Created by yusufmalikul").size(13)).width(Length::Fill).align_right(Length::Fill).padding([2, 8]);

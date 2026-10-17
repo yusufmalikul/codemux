@@ -264,6 +264,8 @@ pub(crate) enum Message {
     SwitchAccount(String, u64),
     /// Check if the stopped Claude of a pending switch has exited.
     SwitchCheck,
+    /// Hide the error banner.
+    DismissError,
 }
 
 /// The work of a background refresh. Some(index) when anything changed.
@@ -706,6 +708,7 @@ impl App {
             }
             Message::DeleteAsk(sid) => self.confirm_delete = Some(sid),
             Message::DeleteCancel => self.confirm_delete = None,
+            Message::DismissError => self.error = None,
             Message::DeleteConfirm(sid) => self.delete_session(&sid),
             Message::NewWorkspaceStart => {
                 self.new_workspace = Some(String::new());
