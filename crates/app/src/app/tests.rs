@@ -714,3 +714,49 @@ fn error_banner_can_be_dismissed() {
     assert!(app.error.is_none());
     assert!(!found_after_frames(&mut app, vec![], "Session tidak ditemukan."));
 }
+
+/// Closing a tab while Claude works asks first. Escape keeps the tab;
+/// "Close anyway" closes it.
+#[test]
+fn closing_a_working_claude_tab_asks_first() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    app.tabs[0].kind = TabKind::Claude;
+    app.tabs[0].busy = Some(true);
+    let id = app.tabs[0].id;
+    let _ = app.update(Message::CloseTab(id));
+    assert_eq!(app.tabs.len(), 1, "closed while Claude works");
+    assert!(found_after_frames(&mut app, vec![], "Claude is still working. Close anyway?"));
+    let _ = app.update(Message::Escape);
+    assert!(app.confirm_close_tab.is_none());
+    assert_eq!(app.tabs.len(), 1);
+    let _ = app.update(Message::CloseSelected);
+    let _ = app.update(Message::CloseTabConfirm(id));
+    assert!(app.tabs.is_empty());
+}
+
+#[test]
+fn closing_an_idle_tab_needs_no_question() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
+    let _ = app.update(Message::CloseTab(id));
+    assert!(app.tabs.is_empty());
+}
+
+/// Escape cancels whatever inline input or question is open.
+#[test]
+fn escape_cancels_inline_inputs() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::RenameStart("s1".into()));
+    let _ = app.update(Message::NewWorkspaceStart);
+    let _ = app.update(Message::ToggleAddMenu);
+    let _ = app.update(Message::DeleteAsk("s1".into()));
+    let _ = app.update(Message::NewAccountStart);
+    let _ = app.update(Message::Escape);
+    assert!(app.renaming.is_none());
+    assert!(app.new_workspace.is_none());
+    assert!(!app.add_menu);
+    assert!(app.confirm_delete.is_none());
+    assert!(app.new_account.is_none());
+}

@@ -172,6 +172,8 @@ pub(crate) struct App {
     scale_factor: f32,
     /// Session waiting for "Delete permanently" confirmation.
     confirm_delete: Option<String>,
+    /// Tab whose close waits for "Close anyway", because Claude still works in it.
+    confirm_close_tab: Option<u64>,
     /// Workspace whose delete is waiting for a yes or no.
     confirm_delete_workspace: Option<u64>,
     /// Privacy: the sidebar is collapsed (saved in state.json).
@@ -225,8 +227,14 @@ pub(crate) enum Message {
     SelectTab(u64),
     SelectSession(String),
     Resume(String),
+    /// Close a tab. Asks first while Claude works in it.
     CloseTab(u64),
     CloseSelected,
+    /// Close a tab even though Claude still works in it.
+    CloseTabConfirm(u64),
+    CloseTabCancel,
+    /// Cancel whatever inline input or question is open.
+    Escape,
     Search(String),
     SelectIndex(usize),
     ScaleFactor(f32),
@@ -296,6 +304,11 @@ fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::win
         _ => {}
     }
     let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else { return None };
+    // Escape needs no modifier. The terminal still gets it too, which is
+    // fine: it only cancels inline inputs and questions in the app.
+    if key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape) {
+        return Some(Message::Escape);
+    }
     let app_mod = if cfg!(target_os = "macos") {
         modifiers.logo() && !modifiers.control()
     } else {
@@ -379,6 +392,7 @@ impl App {
             error: None,
             scale_factor: 1.0,
             confirm_delete: None,
+            confirm_close_tab: None,
             confirm_delete_workspace: None,
             hide_sidebar: state.hide_sidebar,
             sidebar_width: state.sidebar_width.unwrap_or(SIDEBAR_DEFAULT).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
@@ -687,12 +701,18 @@ impl App {
                 self.selected = Selected::Session(sid);
             }
             Message::Resume(sid) => return self.resume(sid),
-            Message::CloseTab(id) => return self.close_tab(id),
+            Message::CloseTab(id) => return self.request_close(id),
             Message::CloseSelected => {
                 if let Selected::Tab(id) = self.selected {
-                    return self.close_tab(id);
+                    return self.request_close(id);
                 }
             }
+            Message::CloseTabConfirm(id) => {
+                self.confirm_close_tab = None;
+                return self.close_tab(id);
+            }
+            Message::CloseTabCancel => self.confirm_close_tab = None,
+            Message::Escape => self.cancel_inline(),
             Message::Search(s) => self.search = s,
             Message::ToggleAddMenu => self.add_menu = !self.add_menu,
             Message::ToggleHideSidebar => {
@@ -848,6 +868,37 @@ impl App {
                 self.save_state();
             }
             Err(e) => self.error = Some(format!("Failed to delete session: {e}")),
+        }
+    }
+
+    /// Close a tab, or ask first while Claude works in it. The question shows
+    /// in the tab's header, so the tab is selected if it was not. A second
+    /// close request on the shown question (for example ⌘W twice) closes.
+    fn request_close(&mut self, id: u64) -> Task<Message> {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return Task::none() };
+        let asked = self.confirm_close_tab == Some(id) && self.selected == Selected::Tab(id);
+        if self.tab_status(tab) == "working" && !asked {
+            self.confirm_close_tab = Some(id);
+            if self.selected != Selected::Tab(id) {
+                self.selected = Selected::Tab(id);
+                return self.focus_tab(id);
+            }
+            return Task::none();
+        }
+        self.confirm_close_tab = None;
+        self.close_tab(id)
+    }
+
+    /// Escape: drop every inline input and open question.
+    fn cancel_inline(&mut self) {
+        self.renaming = None;
+        self.new_workspace = None;
+        self.new_account = None;
+        self.add_menu = false;
+        self.confirm_delete = None;
+        self.confirm_close_tab = None;
+        if self.confirm_delete_workspace.take().is_some() {
+            self.workspaces_version += 1;
         }
     }
 

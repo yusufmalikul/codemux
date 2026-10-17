@@ -3,7 +3,7 @@
 
 use super::*;
 use super::sidebar::{close_style, relative_time};
-use iced::widget::column;
+use iced::widget::{column, stack};
 
 fn empty_state<'a>() -> Element<'a, Message> {
     container(text("Pick a session on the left, or start a New session / New terminal.").size(14))
@@ -33,7 +33,21 @@ impl App {
                     if let Some(sid) = tab.session_id.as_ref().filter(|_| !self.accounts.is_empty() && tab.kind == TabKind::Claude) {
                         header = header.push(self.account_picker(sid, self.tab_account(tab), 12));
                     }
-                    let header = header.push(button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger));
+                    // The question replaces the Close button, so the header
+                    // keeps its height and the terminal does not move.
+                    let header = if self.confirm_close_tab == Some(tab.id) {
+                        header.push(
+                            row![
+                                text("Claude is still working. Close anyway?").size(12),
+                                button(text("Close anyway").size(12)).on_press(Message::CloseTabConfirm(tab.id)).style(button::danger),
+                                button(text("Cancel").size(12)).on_press(Message::CloseTabCancel).style(button::secondary),
+                            ]
+                            .spacing(6)
+                            .align_y(iced::Alignment::Center),
+                        )
+                    } else {
+                        header.push(button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger))
+                    };
                     column![header, rule::horizontal(1), term::TerminalView::show(&tab.term).map(Message::Terminal)]
                         .into()
                 }
@@ -113,21 +127,25 @@ impl App {
             Selected::Accounts => self.accounts_view(),
             Selected::None => empty_state(),
         };
-        let mut col = Column::new();
-        if let Some(e) = &self.error {
-            // Red banner with a ✕ at the end, so the user can clear it.
-            let banner = row![
-                text(e.clone()).size(12).width(Length::Fill),
-                button(text("✕").size(12)).padding([0, 6]).on_press(Message::DismissError).style(close_style),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center);
-            col = col.push(container(banner).padding(8).width(Length::Fill).style(container::danger));
-        }
+        let body = container(body).width(Length::Fill).height(Length::Fill);
+        // The error floats over the bottom of the body, so it never changes
+        // the body's size: the terminal keeps its rows and does not reflow.
+        let body: Element<'_, Message> = match &self.error {
+            Some(e) => {
+                let banner = row![
+                    text(e.clone()).size(12).width(Length::Fill),
+                    button(text("✕").size(12)).padding([0, 6]).on_press(Message::DismissError).style(close_style),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center);
+                let banner = container(banner).padding(8).width(Length::Fill).style(container::danger);
+                stack![body, container(banner).width(Length::Fill).align_bottom(Length::Fill).padding(8)].into()
+            }
+            None => body.into(),
+        };
         // Own row under the body, so it never covers terminal text.
         let credit = container(text("Created by yusufmalikul").size(13)).width(Length::Fill).align_right(Length::Fill).padding([2, 8]);
-        let body = container(body).width(Length::Fill).height(Length::Fill);
-        container(col.push(body).push(credit)).width(Length::Fill).height(Length::Fill).into()
+        container(column![body, credit]).width(Length::Fill).height(Length::Fill).into()
     }
 
     /// A session's title with a "Rename" button, or the name box while it is
