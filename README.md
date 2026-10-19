@@ -35,6 +35,8 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 
 ### Sessions
 
+- **Open tabs on top.** Every open tab, from every workspace, is in one OPEN block at the top of the sidebar,
+  with its workspace name. It does not scroll away, so you can switch tabs without scrolling.
 - **Sidebar with every session.** Sessions are grouped into Previously open, Today, Yesterday,
   Last 7 days, Last 30 days and Older. Each row shows the title, project folder, branch and last activity time.
 - **Search** by title, folder, branch or last prompt.

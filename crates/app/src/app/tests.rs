@@ -172,11 +172,12 @@ fn workspaces_group_sessions_as_a_collapsible_tree() {
     assert!(!found_after_frames(&mut again, vec![Message::ToggleWorkspace(None)], "Fix webhook retry"), "default not collapsed");
 }
 
-/// A session open in a tab stays inside its workspace (there is no
-/// separate ACTIVE list). A collapsed workspace shows how many tabs are
-/// open in it, and selecting such a tab opens the workspace again.
+/// An open tab is listed in the OPEN block with its workspace name, not
+/// inside the tree. Its workspace header still counts it as open. Folding
+/// the workspace never hides the tab, and selecting the tab does not unfold
+/// the workspace.
 #[test]
-fn open_tab_stays_inside_its_workspace() {
+fn open_tab_shows_its_workspace_and_stays_when_folded() {
     let (_dir, mut app) = fixture();
     for m in [
         Message::NewWorkspaceStart,
@@ -195,17 +196,37 @@ fn open_tab_stays_inside_its_workspace() {
     let (title, _) = app.tab_title(&app.tabs[0]);
     let row = title.as_str();
 
-    assert!(!found_after_frames(&mut app, vec![], "ACTIVE"), "separate ACTIVE list still shown");
+    assert!(found_after_frames(&mut app, vec![], "OPEN"), "no OPEN block");
+    assert!(found_after_frames(&mut app, vec![], row), "tab row missing");
+    assert!(found_after_frames(&mut app, vec![], "Backend"), "workspace name missing on the tab row");
     assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"), "open badge missing");
-    assert!(found_after_frames(&mut app, vec![], row), "tab row not in its workspace");
     assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
 
     let msgs = vec![Message::ToggleWorkspace(Some(1))];
-    assert!(!found_after_frames(&mut app, msgs, row), "not collapsed");
+    assert!(found_after_frames(&mut app, msgs, row), "folding hid the tab");
     assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"));
 
     let tab = app.tabs[0].id;
-    assert!(found_after_frames(&mut app, vec![Message::SelectTab(tab)], "▾ Backend  (1)  ● 1 open"), "not opened on select");
+    let _ = app.update(Message::SelectTab(tab));
+    app.selected = Selected::None;
+    assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"), "selecting unfolded the workspace");
+
+    // With no workspaces made, every tab is in Default: no name is shown.
+    let _ = app.update(Message::DeleteWorkspace(1));
+    assert!(found_after_frames(&mut app, vec![], row));
+    assert!(!found_after_frames(&mut app, vec![], "Default"), "workspace name shown with no workspaces");
+}
+
+/// Search filters the OPEN block too, and hides it when no tab matches.
+#[test]
+fn search_filters_open_tabs() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    app.tabs[0].session_id = Some("s1".into());
+    app.selected = Selected::None;
+    assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "OPEN"));
+    assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
+    assert!(!found_after_frames(&mut app, vec![Message::Search("nothing like it".into())], "OPEN"), "OPEN shown with no match");
 }
 
 /// A new terminal opens in the workspace the user is looking at, and the
@@ -759,4 +780,48 @@ fn escape_cancels_inline_inputs() {
     assert!(!app.add_menu);
     assert!(app.confirm_delete.is_none());
     assert!(app.new_account.is_none());
+}
+
+/// Two tabs in different workspaces must both be on screen, even when one
+/// workspace has a long history. Open tabs live in their own block above
+/// the tree, so the user never scrolls to switch between them.
+#[test]
+fn open_tabs_stay_on_screen_above_a_long_history() {
+    let (dir, _) = fixture();
+    let proj = dir.path().join("projects").join("-tmp-proj");
+    let now = Utc::now().to_rfc3339();
+    for i in 0..40 {
+        std::fs::write(
+            proj.join(format!("h{i}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"h{i}\",\"cwd\":\"/tmp\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"hi\"}}}}\n\
+                 {{\"type\":\"ai-title\",\"aiTitle\":\"Old task {i}\",\"sessionId\":\"h{i}\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let mut app = reopen(dir.path());
+    for m in [Message::NewWorkspaceStart, Message::NewWorkspaceName("Backend".into()), Message::NewWorkspaceCreate] {
+        let _ = app.update(m);
+    }
+    for i in 0..40 {
+        let _ = app.update(Message::MoveSession(format!("h{i}"), Some(1)));
+    }
+    // One tab in Backend (Claude resumed s1 there), one in Default.
+    let _ = app.update(Message::MoveSession("s1".into(), Some(1)));
+    let _ = app.update(Message::SelectSession("s1".into()));
+    let _ = app.update(Message::NewTerminal);
+    app.tabs[0].session_id = Some("s1".into());
+    app.adopt_tab_sessions();
+    app.selected = Selected::None;
+    let _ = app.update(Message::NewTerminal);
+    // Show nothing in the main area, so a title can only come from the sidebar.
+    app.selected = Selected::None;
+    assert_eq!(app.tabs[1].workspace, None, "second tab not in Default");
+    let (backend_row, _) = app.tab_title(&app.tabs[0]);
+    let (default_row, _) = app.tab_title(&app.tabs[1]);
+
+    assert!(found_after_frames(&mut app, vec![], "OPEN"), "no OPEN block");
+    assert!(found_after_frames(&mut app, vec![], &backend_row), "Backend tab not on screen");
+    assert!(found_after_frames(&mut app, vec![], &default_row), "Default tab not on screen");
 }

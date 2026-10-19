@@ -19,6 +19,8 @@ pub(super) struct TabRow {
     id: u64,
     session: Option<String>,
     workspace: Option<u64>,
+    /// Workspace name, shown only when the user has made workspaces.
+    workspace_name: String,
     title: String,
     folder: String,
     status: &'static str,
@@ -26,13 +28,16 @@ pub(super) struct TabRow {
 }
 
 fn tab_row(t: &TabRow) -> Element<'static, Message> {
-    let label = row![
+    let mut label = row![
         text("●").size(12).color(status_color(t.status)),
         row_label(t.title.clone(), true),
         account_badge(&t.account),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
+    if !t.workspace_name.is_empty() {
+        label = label.push(workspace_tag(&t.workspace_name));
+    }
     let selected = t.selected;
     let tab = button(label).on_press(Message::SelectTab(t.id)).width(Length::Fill).style(move |theme, status| open_tab_style(theme, status, selected));
     // The accent shows through the left padding as a thin bar on the selected tab.
@@ -48,6 +53,12 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
     .spacing(4)
     .align_y(iced::Alignment::Center)
     .into()
+}
+
+/// Small gray name of the tab's workspace, at the right end of its row.
+fn workspace_tag(name: &str) -> Element<'static, Message> {
+    let tag = text(name.to_string()).size(12).color(iced::Color::from_rgb8(0x80, 0x80, 0x88)).wrapping(text::Wrapping::None);
+    container(tag).width(Length::Fill).align_right(Length::Fill).into()
 }
 
 /// Dot color for a tab: amber when Claude waits for input (it needs you),
@@ -143,6 +154,7 @@ impl App {
                     id: tab.id,
                     session: tab.session_id.clone(),
                     workspace: tab.workspace,
+                    workspace_name: self.tab_workspace_name(tab),
                     title,
                     folder,
                     status,
@@ -150,6 +162,7 @@ impl App {
                 }
             })
             .collect();
+        let open = self.open_list(&tabs);
         let selected_session = match &self.selected {
             Selected::Session(s) => Some(s.clone()),
             _ => None,
@@ -214,8 +227,11 @@ impl App {
         }
 
         let scrolling = self.sidebar_scrolled.is_some();
-        column![
-            top,
+        let mut sidebar = column![top].spacing(8);
+        if let Some(open) = open {
+            sidebar = sidebar.push(open);
+        }
+        sidebar.push(
             // A thin scrollbar with a small gap, so the rows (and their close
             // buttons) keep most of the sidebar width.
             scrollable(list)
@@ -236,28 +252,68 @@ impl App {
                     style
                 })
                 .height(Length::Fill),
-        ]
-        .spacing(8)
+        )
         .into()
     }
 
-    /// The sidebar tree: each workspace with its open tabs first, then its
-    /// other sessions. A session open in a tab is shown only as that tab.
+    /// Every open tab, in tab order (the ⌘1–9 order), from all workspaces.
+    /// It sits above the tree and does not scroll with it, so switching
+    /// between tabs of different workspaces never needs a scroll. Nothing
+    /// is shown when no tab is open or none matches the search.
+    fn open_list(&self, tabs: &[TabRow]) -> Option<Element<'static, Message>> {
+        let q = self.search.to_lowercase();
+        let rows: Vec<&TabRow> = tabs.iter().filter(|t| self.tab_matches(t, &q)).collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let mut list = column![section("OPEN")].spacing(2).width(Length::Fill);
+        for t in rows {
+            list = list.push(tab_row(t));
+        }
+        // Many tabs must not push the tree off screen: past this height the
+        // block scrolls on its own.
+        let list = scrollable(list)
+            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)));
+        Some(container(list).max_height(OPEN_LIST_MAX_HEIGHT).into())
+    }
+
+    /// The search filter for a tab: its session's title, folder, branch and
+    /// last prompt, or for a plain terminal its title and folder.
+    fn tab_matches(&self, t: &TabRow, q: &str) -> bool {
+        match t.session.as_deref().and_then(|s| self.index.listed(s)) {
+            Some(m) => self.session_matches(m, q),
+            None => q.is_empty() || [&t.title, &t.folder].iter().any(|s| s.to_lowercase().contains(q)),
+        }
+    }
+
+    fn session_matches(&self, m: &SessionMeta, q: &str) -> bool {
+        q.is_empty()
+            || [Some(self.session_title(m)), Some(m.title()), m.cwd.as_ref().map(|c| c.display().to_string()), m.git_branch.clone(), m.last_prompt.clone()]
+                .into_iter()
+                .flatten()
+                .any(|s| s.to_lowercase().contains(q))
+    }
+
+    /// The tab's workspace name for its row in the OPEN block. Empty when
+    /// the user has no workspaces, since then every tab is in Default.
+    fn tab_workspace_name(&self, tab: &Tab) -> String {
+        if self.workspaces.is_empty() {
+            return String::new();
+        }
+        tab.workspace
+            .and_then(|id| self.workspaces.iter().find(|w| w.id == id))
+            .map_or(DEFAULT_WORKSPACE.to_string(), |w| w.name.clone())
+    }
+
+    /// The sidebar tree: each workspace with its sessions. Open tabs are in
+    /// the OPEN block above, so a session open in a tab is left out here.
+    /// The workspace header still counts it and shows how many are open.
     pub(super) fn history_list(&self, tabs: &[TabRow]) -> Element<'static, Message> {
         let active: HashSet<&str> = tabs.iter().filter_map(|t| t.session.as_deref()).collect();
         let mut list = Column::new().spacing(2).width(Length::Fill);
         let q = self.search.to_lowercase();
-        let matches = |m: &SessionMeta| {
-            q.is_empty()
-                || [Some(self.session_title(m)), Some(m.title()), m.cwd.as_ref().map(|c| c.display().to_string()), m.git_branch.clone(), m.last_prompt.clone()]
-                    .into_iter()
-                    .flatten()
-                    .any(|s| s.to_lowercase().contains(&q))
-        };
-        let tab_matches = |t: &TabRow| match t.session.as_deref().and_then(|s| self.index.listed(s)) {
-            Some(m) => matches(m),
-            None => q.is_empty() || [&t.title, &t.folder].iter().any(|s| s.to_lowercase().contains(&q)),
-        };
+        let matches = |m: &SessionMeta| self.session_matches(m, &q);
+        let tab_matches = |t: &TabRow| self.tab_matches(t, &q);
 
         // While searching, open every workspace so no match is hidden.
         let searching = !q.is_empty();
@@ -286,9 +342,6 @@ impl App {
                 list = list.push(indent(delete_workspace_confirm(ws.id, &ws.name)));
             }
             if open {
-                for t in open_tabs {
-                    list = list.push(indent(tab_row(t)));
-                }
                 for m in items {
                     list = list.push(indent(self.session_row(m)));
                 }
@@ -321,10 +374,6 @@ impl App {
         list = list.push(workspace_header(None, DEFAULT_WORKSPACE, count, open_tabs.len(), open));
         if !open {
             return list.into();
-        }
-
-        for t in open_tabs {
-            list = list.push(indent(tab_row(t)));
         }
 
         if !prev.is_empty() {

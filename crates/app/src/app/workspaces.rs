@@ -22,7 +22,8 @@ impl std::fmt::Display for WorkspaceChoice {
 /// delete button; the default workspace cannot be removed.
 pub(super) fn workspace_header(id: Option<u64>, name: &str, count: usize, open_tabs: usize, open: bool) -> Element<'static, Message> {
     let arrow = if open { "▾" } else { "▸" };
-    // Shown even when collapsed, so open tabs are never out of sight.
+    // The tabs themselves are in the OPEN block; this tells which
+    // workspace they belong to, even when it is collapsed.
     let badge = if open_tabs > 0 { format!("  ● {open_tabs} open") } else { String::new() };
     let toggle = button(text(format!("{arrow} {name}  ({count}){badge}")).size(15))
         .on_press(Message::ToggleWorkspace(id))
@@ -53,20 +54,6 @@ pub(super) fn delete_workspace_confirm(id: u64, name: &str) -> Element<'static, 
 }
 
 impl App {
-    /// Expand the workspace that holds a tab, so the selected tab is never
-    /// hidden inside a collapsed workspace.
-    pub(super) fn reveal_tab(&mut self, id: u64) {
-        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
-        let collapsed = match tab.workspace {
-            Some(ws) => self.workspaces.iter_mut().find(|w| w.id == ws).map(|w| &mut w.collapsed),
-            None => Some(&mut self.default_collapsed),
-        };
-        if let Some(c) = collapsed.filter(|c| **c) {
-            *c = false;
-            self.workspaces_changed();
-        }
-    }
-
     pub(super) fn workspaces_changed(&mut self) {
         self.workspaces_version += 1;
         self.save_state();

@@ -45,6 +45,9 @@ const DEFAULT_WORKSPACE: &str = "Default";
 
 /// Left indent of rows inside a workspace, so the sidebar reads as a tree.
 const TREE_INDENT: f32 = 16.0;
+/// Past this height the OPEN block in the sidebar scrolls on its own, so
+/// many open tabs never hide the session tree below it.
+const OPEN_LIST_MAX_HEIGHT: f32 = 360.0;
 
 /// Text size of sidebar rows. The session detail view uses it too, so both read the same.
 const TEXT_SIZE: u32 = 16;
@@ -495,7 +498,6 @@ impl App {
                 });
                 self.selected = Selected::Tab(id);
                 self.adopt_tab_sessions();
-                self.reveal_tab(id);
                 self.error = None;
                 self.save_state();
                 focus
@@ -509,7 +511,6 @@ impl App {
 
     /// Show a tab: copy its latest screen, then give it keyboard focus.
     fn focus_tab(&mut self, id: u64) -> Task<Message> {
-        self.reveal_tab(id);
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
         let wakeup = term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Wakeup);
         tab.term.handle(term::Command::ProxyToBackend(wakeup));
