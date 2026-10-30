@@ -35,10 +35,10 @@ impl App {
                     }
                     // The question replaces the Close button, so the header
                     // keeps its height and the terminal does not move.
-                    let header = if self.confirm_close_tab == Some(tab.id) {
+                    let header = if let Some((_, question)) = self.confirm_close_tab.filter(|(t, _)| *t == tab.id) {
                         header.push(
                             row![
-                                text("Claude is still working. Close anyway?").size(12),
+                                text(question).size(12),
                                 button(text("Close anyway").size(12)).on_press(Message::CloseTabConfirm(tab.id)).style(button::danger),
                                 button(text("Cancel").size(12)).on_press(Message::CloseTabCancel).style(button::secondary),
                             ]

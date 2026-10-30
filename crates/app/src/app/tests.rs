@@ -756,6 +756,40 @@ fn closing_a_working_claude_tab_asks_first() {
     assert!(app.tabs.is_empty());
 }
 
+/// Claude waits for the user, but a shell it started still runs in the
+/// background (a dev server, a watcher). Closing the tab would stop it, so
+/// the app asks first.
+#[cfg(unix)]
+#[test]
+fn closing_a_claude_tab_with_a_background_shell_asks_first() {
+    let (_dir, mut app) = fixture();
+    // Like Claude's Bash tool: a shell with a snapshot `source`, below Claude.
+    let claude = LaunchSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "/bin/sh -c 'sleep 30; : /home/me/.claude/shell-snapshots/snapshot-sh-1.sh'; true".into()],
+        env: Default::default(),
+        cwd: std::env::temp_dir(),
+    };
+    let _ = app.spawn(TabKind::Claude, claude, Some("s1".into()), 0);
+    app.tabs[0].busy = Some(false);
+    assert_eq!(app.tab_status(&app.tabs[0]), "waiting");
+    let id = app.tabs[0].id;
+    let pid = app.tabs[0].term.child_pid().unwrap();
+    let start = Instant::now();
+    while !{
+        app.scanner.refresh();
+        app.scanner.has_claude_shell_under(pid)
+    } {
+        assert!(start.elapsed() < Duration::from_secs(5), "shell not started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = app.update(Message::CloseTab(id));
+    assert_eq!(app.tabs.len(), 1, "closed while a shell still runs");
+    assert!(found_after_frames(&mut app, vec![], "A shell Claude started is still running. Close anyway?"));
+    let _ = app.update(Message::CloseTabConfirm(id));
+    assert!(app.tabs.is_empty());
+}
+
 #[test]
 fn closing_an_idle_tab_needs_no_question() {
     let (_dir, mut app) = fixture();

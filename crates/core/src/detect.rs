@@ -44,6 +44,14 @@ pub fn looks_like_claude(name: &str, exe: Option<&Path>, cmd: &[String]) -> bool
     cmd.iter().any(|a| a.contains("@anthropic-ai/claude-code"))
 }
 
+/// True if a process is a shell that Claude Code started for its Bash tool,
+/// for example a command it runs in the background. Claude starts each one
+/// as `<shell> -c "source <config>/shell-snapshots/snapshot-... && eval '<command>'"`.
+/// MCP servers and other helpers of Claude do not have this mark.
+pub fn looks_like_claude_shell(cmd: &[String]) -> bool {
+    cmd.iter().any(|a| a.replace('\\', "/").contains("/shell-snapshots/snapshot-"))
+}
+
 impl ProcScanner {
     pub fn refresh(&mut self) {
         self.sys.refresh_processes_specifics(
@@ -71,6 +79,29 @@ impl ProcScanner {
 
     /// Breadth-first search below `root` for the first Claude Code process.
     pub fn find_claude_under(&self, root: u32) -> Option<ClaudeProc> {
+        self.find_under(root, |_, name, exe, cmd| looks_like_claude(name, exe, cmd)).map(|pid| {
+            let p = &self.sys.processes()[&pid];
+            ClaudeProc {
+                pid: pid.as_u32(),
+                cwd: p.cwd().map(Path::to_path_buf),
+                started: UNIX_EPOCH + Duration::from_secs(p.start_time()),
+            }
+        })
+    }
+
+    /// True if a shell that Claude Code started still runs below `root`,
+    /// for example a dev server it runs in the background. Closing the tab
+    /// stops it.
+    pub fn has_claude_shell_under(&self, root: u32) -> bool {
+        self.find_under(root, |p, _, _, cmd| {
+            !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead) && looks_like_claude_shell(cmd)
+        })
+        .is_some()
+    }
+
+    /// Breadth-first search below `root` for the first process that `hit`
+    /// accepts. `hit` gets the process, its name, exe and command line.
+    fn find_under(&self, root: u32, hit: impl Fn(&sysinfo::Process, &str, Option<&Path>, &[String]) -> bool) -> Option<Pid> {
         let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
         for (pid, p) in self.sys.processes() {
             if let Some(parent) = p.parent() {
@@ -81,12 +112,8 @@ impl ProcScanner {
         while let Some(pid) = queue.pop_front() {
             let Some(p) = self.sys.process(pid) else { continue };
             let cmd: Vec<String> = p.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
-            if looks_like_claude(&p.name().to_string_lossy(), p.exe(), &cmd) {
-                return Some(ClaudeProc {
-                    pid: pid.as_u32(),
-                    cwd: p.cwd().map(Path::to_path_buf),
-                    started: UNIX_EPOCH + Duration::from_secs(p.start_time()),
-                });
+            if hit(p, &p.name().to_string_lossy(), p.exe(), &cmd) {
+                return Some(pid);
             }
             if let Some(c) = children.get(&pid) {
                 queue.extend(c.iter().copied());
@@ -158,6 +185,17 @@ mod tests {
         assert!(looks_like_claude("node", None, &["node".into(), "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js".into()]));
         assert!(!looks_like_claude("zsh", Some(Path::new("/bin/zsh")), &["-zsh".into()]));
         assert!(!looks_like_claude("Claude Helper", None, &[]));
+    }
+
+    #[test]
+    fn recognises_claude_shells() {
+        let shell = |s: &str| vec!["/bin/zsh".to_string(), "-c".to_string(), s.to_string()];
+        assert!(looks_like_claude_shell(&shell(
+            "source /Users/me/.claude/shell-snapshots/snapshot-zsh-1792395670753-6t2rc1.sh 2>/dev/null || true && eval 'npm run dev'"
+        )));
+        assert!(looks_like_claude_shell(&shell(r"source C:\Users\me\.claude\shell-snapshots\snapshot-bash-1.sh && eval 'x'")));
+        assert!(!looks_like_claude_shell(&shell("npm run dev")));
+        assert!(!looks_like_claude_shell(&["uvx".into(), "mcp-proxy-for-aws".into()]));
     }
 
     #[test]
@@ -243,5 +281,36 @@ mod tests {
         let found = found.expect("claude child not found");
         let cwd = fs::canonicalize(found.cwd.unwrap()).unwrap();
         assert_eq!(cwd, fs::canonicalize(dir.path()).unwrap());
+    }
+
+    /// Real process tree: Claude runs a command in the background through
+    /// its shell wrapper, two levels below the tab's shell.
+    #[cfg(unix)]
+    #[test]
+    fn finds_claude_shell_in_real_process_tree() {
+        let mut tab = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("/bin/sh -c 'sleep 30; : /home/me/.claude/shell-snapshots/snapshot-sh-1.sh'; true")
+            .spawn()
+            .unwrap();
+        let mut scanner = ProcScanner::default();
+        let mut found = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(100));
+            scanner.refresh();
+            found = scanner.has_claude_shell_under(tab.id());
+            if found {
+                break;
+            }
+        }
+        let _ = tab.kill();
+        assert!(found, "claude shell not found");
+
+        let mut plain = std::process::Command::new("/bin/sh").arg("-c").arg("sleep 30; true").spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        scanner.refresh();
+        let none = !scanner.has_claude_shell_under(plain.id());
+        let _ = plain.kill();
+        assert!(none, "plain shell seen as a claude shell");
     }
 }

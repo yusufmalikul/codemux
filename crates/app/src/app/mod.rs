@@ -30,6 +30,10 @@ const SCROLLBAR_LINGER: Duration = Duration::from_millis(800);
 /// Output in the last 2 seconds means Claude is working (spec 7, fallback).
 const BUSY_WINDOW: Duration = Duration::from_secs(2);
 
+/// Questions shown before closing a tab (see `close_question`).
+const CLOSE_WORKING: &str = "Claude is still working. Close anyway?";
+const CLOSE_SHELL: &str = "A shell Claude started is still running. Close anyway?";
+
 const HISTORY_LIMIT: usize = 300;
 
 const SIDEBAR_DEFAULT: f32 = 300.0;
@@ -175,8 +179,9 @@ pub(crate) struct App {
     scale_factor: f32,
     /// Session waiting for "Delete permanently" confirmation.
     confirm_delete: Option<String>,
-    /// Tab whose close waits for "Close anyway", because Claude still works in it.
-    confirm_close_tab: Option<u64>,
+    /// Tab whose close waits for "Close anyway", and the question shown:
+    /// Claude still works in it, or a shell it started still runs.
+    confirm_close_tab: Option<(u64, &'static str)>,
     /// Workspace whose delete is waiting for a yes or no.
     confirm_delete_workspace: Option<u64>,
     /// Privacy: the sidebar is collapsed (saved in state.json).
@@ -872,14 +877,17 @@ impl App {
         }
     }
 
-    /// Close a tab, or ask first while Claude works in it. The question shows
-    /// in the tab's header, so the tab is selected if it was not. A second
-    /// close request on the shown question (for example ⌘W twice) closes.
+    /// Close a tab, or ask first while Claude works in it or a shell it
+    /// started still runs. The question shows in the tab's header, so the
+    /// tab is selected if it was not. A second close request on the shown
+    /// question (for example ⌘W twice) closes.
     fn request_close(&mut self, id: u64) -> Task<Message> {
-        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return Task::none() };
-        let asked = self.confirm_close_tab == Some(id) && self.selected == Selected::Tab(id);
-        if self.tab_status(tab) == "working" && !asked {
-            self.confirm_close_tab = Some(id);
+        if !self.tabs.iter().any(|t| t.id == id) {
+            return Task::none();
+        }
+        let asked = self.confirm_close_tab.is_some_and(|(t, _)| t == id) && self.selected == Selected::Tab(id);
+        if let Some(question) = self.close_question(id).filter(|_| !asked) {
+            self.confirm_close_tab = Some((id, question));
             if self.selected != Selected::Tab(id) {
                 self.selected = Selected::Tab(id);
                 return self.focus_tab(id);
@@ -888,6 +896,23 @@ impl App {
         }
         self.confirm_close_tab = None;
         self.close_tab(id)
+    }
+
+    /// Why closing a tab needs a yes first, if it does. A shell that Claude
+    /// started (for example a dev server in the background) stops with the
+    /// tab, and the sidebar shows such a tab as "waiting", so it is easy to
+    /// miss.
+    fn close_question(&mut self, id: u64) -> Option<&'static str> {
+        let tab = self.tabs.iter().find(|t| t.id == id)?;
+        match self.tab_status(tab) {
+            "working" => Some(CLOSE_WORKING),
+            "waiting" => {
+                let pid = tab.term.child_pid()?;
+                self.scanner.refresh();
+                self.scanner.has_claude_shell_under(pid).then_some(CLOSE_SHELL)
+            }
+            _ => None,
+        }
     }
 
     /// Escape: drop every inline input and open question.
