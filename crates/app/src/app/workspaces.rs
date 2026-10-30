@@ -1,6 +1,7 @@
 //! Workspaces: named groups of sessions in the sidebar tree.
 
 use super::*;
+use super::ellipsis::ellipsis;
 use super::sidebar::close_style;
 use iced::widget::column;
 
@@ -25,7 +26,10 @@ pub(super) fn workspace_header(id: Option<u64>, name: &str, count: usize, open_t
     // The tabs themselves are in the OPEN block; this tells which
     // workspace they belong to, even when it is collapsed.
     let badge = if open_tabs > 0 { format!("  ● {open_tabs} open") } else { String::new() };
-    let toggle = button(text(format!("{arrow} {name}  ({count}){badge}")).size(15))
+    // A long name ends in "…", so the count stays in view on one line.
+    let label = row![ellipsis(format!("{arrow} {name}")).size(15).hug(), text(format!("({count}){badge}")).size(15).wrapping(text::Wrapping::None)]
+        .spacing(8);
+    let toggle = button(label)
         .on_press(Message::ToggleWorkspace(id))
         .width(Length::Fill)
         .style(button::text);

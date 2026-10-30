@@ -3,6 +3,7 @@
 
 mod accounts;
 mod detail;
+mod ellipsis;
 mod sidebar;
 mod notify;
 mod workspaces;

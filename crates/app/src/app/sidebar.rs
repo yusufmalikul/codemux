@@ -2,6 +2,7 @@
 
 use super::*;
 use super::accounts::account_badge;
+use super::ellipsis::ellipsis;
 use super::workspaces::{delete_workspace_confirm, workspace_header};
 use iced::widget::column;
 
@@ -55,10 +56,10 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
     .into()
 }
 
-/// Small gray name of the tab's workspace, at the right end of its row.
+/// Small gray name of the tab's workspace. The title before it fills the
+/// row, so this sits at the right end.
 fn workspace_tag(name: &str) -> Element<'static, Message> {
-    let tag = text(name.to_string()).size(12).color(iced::Color::from_rgb8(0x80, 0x80, 0x88)).wrapping(text::Wrapping::None);
-    container(tag).width(Length::Fill).align_right(Length::Fill).into()
+    text(name.to_string()).size(12).color(iced::Color::from_rgb8(0x80, 0x80, 0x88)).wrapping(text::Wrapping::None).into()
 }
 
 /// Dot color for a tab: amber when Claude waits for input (it needs you),
@@ -87,8 +88,9 @@ fn open_tab_style(theme: &iced::Theme, status: button::Status, selected: bool) -
 
 /// Sidebar label: only the session name, bold for a session open in a tab.
 /// Details (folder, branch, time) show in the main area when selected.
+/// Always one line: a long name ends in "…".
 fn row_label(title: String, bold: bool) -> Element<'static, Message> {
-    text(title).size(TEXT_SIZE).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
+    ellipsis(title).size(TEXT_SIZE).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {

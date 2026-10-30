@@ -59,6 +59,54 @@ fn found_after_frames(app: &mut App, messages: Vec<Message>, needle: &str) -> bo
     }
 }
 
+/// Every text really visible on screen after the messages, with where it is.
+fn texts_after_frames(app: &mut App, messages: Vec<Message>) -> Vec<(String, iced::Rectangle)> {
+    use iced_test::core::renderer::Headless;
+    use iced_test::core::{widget, Font, Pixels, Size};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    use iced_test::selector::{Candidate, Selector};
+
+    let mut renderer = iced_test::futures::futures::executor::block_on(
+        iced_test::renderer::Renderer::new(Font::with_name("Fira Sans"), Pixels(16.0), None),
+    )
+    .unwrap();
+    let size = Size::new(1280.0, 800.0);
+    let mut cache = Cache::default();
+    for m in messages {
+        let ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        cache = ui.into_cache();
+        let _ = app.update(m);
+    }
+    let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+    let mut op = (|c: Candidate<'_>| match c {
+        Candidate::Text { content, visible_bounds: Some(b), .. } if b.width > 0.0 && b.height > 0.0 => Some((content.to_string(), b)),
+        _ => None,
+    })
+    .find_all();
+    ui.operate(&renderer, &mut widget::operation::black_box(&mut op));
+    match widget::Operation::finish(&op) {
+        widget::operation::Outcome::Some(texts) => texts,
+        _ => Vec::new(),
+    }
+}
+
+/// A sidebar name on screen, whole or cut to fit with "…" at the end.
+fn name_after_frames(app: &mut App, messages: Vec<Message>, name: &str) -> bool {
+    texts_after_frames(app, messages)
+        .iter()
+        .any(|(t, _)| t == name || t.strip_suffix('…').is_some_and(|start| !start.is_empty() && name.starts_with(start)))
+}
+
+/// A workspace header: its name (cut with "…" when long) and, right after
+/// it on the same line, its session count.
+fn header_after_frames(app: &mut App, messages: Vec<Message>, name: &str, count: &str) -> bool {
+    let texts = texts_after_frames(app, messages);
+    texts.iter().any(|(n, nb)| {
+        n == name
+            && texts.iter().any(|(c, cb)| c == count && (cb.center_y() - nb.center_y()).abs() < 1.0 && cb.x > nb.x + nb.width)
+    })
+}
+
 #[test]
 fn sidebar_keeps_sessions_after_more_frames() {
     let (_dir, mut app) = fixture();
@@ -144,7 +192,7 @@ fn sidebar_resize_is_clamped_and_remembered() {
 #[test]
 fn workspaces_group_sessions_as_a_collapsible_tree() {
     let (dir, mut app) = fixture();
-    assert!(found_after_frames(&mut app, vec![], "▾ Default  (1)"), "no default workspace");
+    assert!(header_after_frames(&mut app, vec![], "▾ Default", "(1)"), "no default workspace");
 
     let msgs = vec![
         Message::NewWorkspaceStart,
@@ -152,23 +200,23 @@ fn workspaces_group_sessions_as_a_collapsible_tree() {
         Message::NewWorkspaceCreate,
         Message::MoveSession("s1".into(), Some(1)),
     ];
-    assert!(found_after_frames(&mut app, msgs, "▾ Backend  (1)"), "workspace not shown");
-    assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+    assert!(header_after_frames(&mut app, msgs, "▾ Backend", "(1)"), "workspace not shown");
+    assert!(header_after_frames(&mut app, vec![], "▾ Default", "(0)"));
     assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
 
     assert!(!found_after_frames(&mut app, vec![Message::ToggleWorkspace(Some(1))], "Fix webhook retry"), "not collapsed");
-    assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)"));
+    assert!(header_after_frames(&mut app, vec![], "▸ Backend", "(1)"));
     // Search opens collapsed workspaces so matches are not hidden.
     assert!(found_after_frames(&mut app, vec![Message::Search("webhook".into())], "Fix webhook retry"));
     let _ = app.update(Message::Search(String::new()));
 
     let mut again = reopen(dir.path());
-    assert!(found_after_frames(&mut again, vec![], "▸ Backend  (1)"), "not remembered");
+    assert!(header_after_frames(&mut again, vec![], "▸ Backend", "(1)"), "not remembered");
     assert!(!found_after_frames(&mut again, vec![], "Fix webhook retry"));
 
     let msgs = vec![Message::DeleteWorkspace(1)];
     assert!(found_after_frames(&mut again, msgs, "Fix webhook retry"));
-    assert!(found_after_frames(&mut again, vec![], "▾ Default  (1)"));
+    assert!(header_after_frames(&mut again, vec![], "▾ Default", "(1)"));
     assert!(!found_after_frames(&mut again, vec![Message::ToggleWorkspace(None)], "Fix webhook retry"), "default not collapsed");
 }
 
@@ -197,23 +245,23 @@ fn open_tab_shows_its_workspace_and_stays_when_folded() {
     let row = title.as_str();
 
     assert!(found_after_frames(&mut app, vec![], "OPEN"), "no OPEN block");
-    assert!(found_after_frames(&mut app, vec![], row), "tab row missing");
+    assert!(name_after_frames(&mut app, vec![], row), "tab row missing");
     assert!(found_after_frames(&mut app, vec![], "Backend"), "workspace name missing on the tab row");
-    assert!(found_after_frames(&mut app, vec![], "▾ Backend  (1)  ● 1 open"), "open badge missing");
-    assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+    assert!(header_after_frames(&mut app, vec![], "▾ Backend", "(1)  ● 1 open"), "open badge missing");
+    assert!(header_after_frames(&mut app, vec![], "▾ Default", "(0)"));
 
     let msgs = vec![Message::ToggleWorkspace(Some(1))];
-    assert!(found_after_frames(&mut app, msgs, row), "folding hid the tab");
-    assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"));
+    assert!(name_after_frames(&mut app, msgs, row), "folding hid the tab");
+    assert!(header_after_frames(&mut app, vec![], "▸ Backend", "(1)  ● 1 open"));
 
     let tab = app.tabs[0].id;
     let _ = app.update(Message::SelectTab(tab));
     app.selected = Selected::None;
-    assert!(found_after_frames(&mut app, vec![], "▸ Backend  (1)  ● 1 open"), "selecting unfolded the workspace");
+    assert!(header_after_frames(&mut app, vec![], "▸ Backend", "(1)  ● 1 open"), "selecting unfolded the workspace");
 
     // With no workspaces made, every tab is in Default: no name is shown.
     let _ = app.update(Message::DeleteWorkspace(1));
-    assert!(found_after_frames(&mut app, vec![], row));
+    assert!(name_after_frames(&mut app, vec![], row));
     assert!(!found_after_frames(&mut app, vec![], "Default"), "workspace name shown with no workspaces");
 }
 
@@ -246,14 +294,14 @@ fn new_terminal_opens_in_the_current_workspace() {
     }
     let shown = std::mem::replace(&mut app.selected, Selected::None);
     let (row, _) = app.tab_title(&app.tabs[0]);
-    assert!(found_after_frames(&mut app, vec![], "▾ Backend  (2)  ● 1 open"), "terminal not in Backend");
-    assert!(found_after_frames(&mut app, vec![], &row), "tab row hidden");
-    assert!(found_after_frames(&mut app, vec![], "▾ Default  (0)"));
+    assert!(header_after_frames(&mut app, vec![], "▾ Backend", "(2)  ● 1 open"), "terminal not in Backend");
+    assert!(name_after_frames(&mut app, vec![], &row), "tab row hidden");
+    assert!(header_after_frames(&mut app, vec![], "▾ Default", "(0)"));
     app.selected = shown;
 
     // A second terminal opened from that tab stays in Backend too.
     let _ = app.update(Message::NewTerminal);
-    assert!(found_after_frames(&mut app, vec![], "▾ Backend  (3)  ● 2 open"));
+    assert!(header_after_frames(&mut app, vec![], "▾ Backend", "(3)  ● 2 open"));
 
     // Claude found in the tab: its session is saved into Backend.
     app.tabs[1].session_id = Some("s2".into());
@@ -262,8 +310,8 @@ fn new_terminal_opens_in_the_current_workspace() {
 
     // Moving the session moves its tab with it.
     let _ = app.update(Message::MoveSession("s2".into(), None));
-    assert!(found_after_frames(&mut app, vec![], "▾ Backend  (2)  ● 1 open"));
-    assert!(found_after_frames(&mut app, vec![], "▾ Default  (1)  ● 1 open"));
+    assert!(header_after_frames(&mut app, vec![], "▾ Backend", "(2)  ● 1 open"));
+    assert!(header_after_frames(&mut app, vec![], "▾ Default", "(1)  ● 1 open"));
 }
 
 /// Claude redraws its status line now and then while idle. That output
@@ -856,6 +904,38 @@ fn open_tabs_stay_on_screen_above_a_long_history() {
     let (default_row, _) = app.tab_title(&app.tabs[1]);
 
     assert!(found_after_frames(&mut app, vec![], "OPEN"), "no OPEN block");
-    assert!(found_after_frames(&mut app, vec![], &backend_row), "Backend tab not on screen");
-    assert!(found_after_frames(&mut app, vec![], &default_row), "Default tab not on screen");
+    assert!(name_after_frames(&mut app, vec![], &backend_row), "Backend tab not on screen");
+    assert!(name_after_frames(&mut app, vec![], &default_row), "Default tab not on screen");
+}
+
+/// A long name in the sidebar stays on one line and ends in "…", and the
+/// things after it on the row (workspace count, account badge) stay in view.
+#[test]
+fn long_sidebar_names_are_cut_to_one_line() {
+    let (dir, _) = fixture();
+    let cwd = dir.path().join("work");
+    let cwd = cwd.display();
+    let now = Utc::now().to_rfc3339();
+    let long = "Make the sidebar show only one line of each session name and cut the rest with three dots at the end";
+    std::fs::write(
+        dir.path().join("projects").join("-tmp-proj").join("s2.jsonl"),
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"s2\",\"cwd\":\"{cwd}\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"hi\"}}}}\n\
+             {{\"type\":\"ai-title\",\"aiTitle\":\"{long}\",\"sessionId\":\"s2\"}}\n"
+        ),
+    )
+    .unwrap();
+    let mut app = reopen(dir.path());
+    let ws = "A workspace with a very long name that does not fit";
+    let msgs = vec![Message::NewWorkspaceStart, Message::NewWorkspaceName(ws.into()), Message::NewWorkspaceCreate];
+    let texts = texts_after_frames(&mut app, msgs);
+    let row = texts.iter().find(|(t, _)| t.starts_with("Make the sidebar") ).expect("long session not on screen");
+    assert!(row.0.ends_with('…') && row.0.len() < long.len(), "not cut: {:?}", row.0);
+    assert!(row.1.x + row.1.width <= app.sidebar_width, "runs past the sidebar: {:?}", row.1);
+    assert!(row.1.height < 2.0 * TEXT_SIZE as f32, "more than one line: {:?}", row.1);
+    assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"), "a short name must not be cut");
+
+    let name = texts.iter().find(|(t, _)| t.starts_with("▾ A workspace")).expect("workspace not on screen");
+    assert!(name.0.ends_with('…'), "workspace name not cut: {:?}", name.0);
+    assert!(header_after_frames(&mut app, vec![], &name.0, "(0)"), "count not shown after the cut name");
 }
