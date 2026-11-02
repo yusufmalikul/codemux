@@ -14,13 +14,15 @@ use chrono::{DateTime, Local, Utc};
 use codemux_core::detect::{self, ClaudeProc, ProcScanner};
 use codemux_core::launch::{self, ClaudeMode, LaunchSpec};
 use codemux_core::paths;
-use codemux_core::sessions::{Index, Role, Root, SessionMeta};
+use codemux_core::sessions::{self, Index, Role, Root, SessionMeta};
 use codemux_core::store::{Account, AppState, Workspace};
 use codemux_terminal as term;
 use iced::widget::{button, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(1500);
@@ -61,6 +63,11 @@ const TEXT_SIZE: u32 = 16;
 const SMALL_TEXT_SIZE: u32 = 14;
 
 const WORKSPACE_INPUT: &str = "new-workspace-name";
+/// The search box, focused again after its clear button is clicked.
+const SEARCH_INPUT: &str = "search";
+/// How long typing must pause before session files are searched.
+#[cfg(not(test))]
+const CONTENT_SEARCH_DELAY: Duration = Duration::from_millis(250);
 
 const ACCOUNT_INPUT: &str = "new-account-name";
 
@@ -147,6 +154,17 @@ pub(crate) struct App {
     /// Bumped by every refresh done on this thread. A background result that
     /// started from an older index is thrown away.
     index_gen: u64,
+    /// Sessions whose conversation contains the search text. Found on another
+    /// thread (see search_conversations_in_background), when the search changes.
+    content_hits: HashSet<String>,
+    /// Bumped when `content_hits` changes, so the lazy sidebar knows to rebuild.
+    content_hits_version: u64,
+    /// Bumped by every search change. An older search's result is thrown away.
+    content_search_gen: u64,
+    /// Stops the running conversation search.
+    content_search_cancel: Arc<AtomicBool>,
+    /// A conversation search for the current text still runs.
+    content_searching: bool,
     /// Config folder of the default account (`~/.claude`).
     default_config: Option<PathBuf>,
     /// Extra accounts (saved in state.json).
@@ -245,6 +263,10 @@ pub(crate) enum Message {
     /// Cancel whatever inline input or question is open.
     Escape,
     Search(String),
+    /// The clear button of the search box.
+    SearchClear,
+    /// The result of a conversation search, with its generation.
+    ContentSearched(u64, HashSet<String>),
     SelectIndex(usize),
     ScaleFactor(f32),
     DeleteAsk(String),
@@ -382,6 +404,11 @@ impl App {
             index_version: 0,
             index_refreshing: false,
             index_gen: 0,
+            content_hits: HashSet::new(),
+            content_hits_version: 0,
+            content_search_gen: 0,
+            content_search_cancel: Arc::default(),
+            content_searching: false,
             default_config,
             accounts: state.accounts,
             unshared: HashMap::new(),
@@ -450,6 +477,42 @@ impl App {
                 let _ = tx.send(refresh_job(index, &roots));
             });
             Task::perform(rx, move |r| Message::IndexRefreshed(gen, r.ok().flatten()))
+        }
+    }
+
+    /// Search the conversations for the current text on another thread, a
+    /// moment after typing stops, as the files can be large. It starts from
+    /// a clean result and stops any search still running. The titles and
+    /// other short fields are matched at once, in session_matches. The
+    /// result comes back as Message::ContentSearched.
+    fn search_conversations_in_background(&mut self) -> Task<Message> {
+        self.content_search_cancel.store(true, Ordering::Relaxed);
+        self.content_search_gen += 1;
+        self.content_hits.clear();
+        self.content_hits_version += 1;
+        self.content_searching = !self.search.is_empty();
+        if self.search.is_empty() {
+            return Task::none();
+        }
+        let gen = self.content_search_gen;
+        let query = self.search.to_lowercase();
+        let files: Vec<(String, PathBuf)> = self.index.sessions().iter().map(|m| (m.id.clone(), m.path.clone())).collect();
+        #[cfg(test)]
+        {
+            // Tests drive the app one message at a time, so do the work here.
+            let hits = sessions::search_conversations(&files, &query, &AtomicBool::new(false));
+            self.update(Message::ContentSearched(gen, hits))
+        }
+        #[cfg(not(test))]
+        {
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.content_search_cancel = cancel.clone();
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(CONTENT_SEARCH_DELAY);
+                let _ = tx.send(sessions::search_conversations(&files, &query, &cancel));
+            });
+            Task::perform(rx, move |r| Message::ContentSearched(gen, r.unwrap_or_default()))
         }
     }
 
@@ -720,7 +783,21 @@ impl App {
             }
             Message::CloseTabCancel => self.confirm_close_tab = None,
             Message::Escape => self.cancel_inline(),
-            Message::Search(s) => self.search = s,
+            Message::Search(s) => {
+                self.search = s;
+                return self.search_conversations_in_background();
+            }
+            Message::SearchClear => {
+                let search = self.update(Message::Search(String::new()));
+                return Task::batch([search, iced::widget::operation::focus(iced::widget::Id::new(SEARCH_INPUT))]);
+            }
+            Message::ContentSearched(gen, hits) => {
+                if gen == self.content_search_gen {
+                    self.content_searching = false;
+                    self.content_hits = hits;
+                    self.content_hits_version += 1;
+                }
+            }
             Message::ToggleAddMenu => self.add_menu = !self.add_menu,
             Message::ToggleHideSidebar => {
                 self.hide_sidebar = !self.hide_sidebar;

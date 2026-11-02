@@ -39,7 +39,8 @@ Codemux never sends your session files anywhere and never calls the Claude API.
   with its workspace name. It does not scroll away, so you can switch tabs without scrolling.
 - **Sidebar with every session.** Sessions are grouped into Previously open, Today, Yesterday,
   Last 7 days, Last 30 days and Older. Each row shows the title, project folder, branch and last activity time.
-- **Search** by title, folder, branch or last prompt.
+- **Search** by title, folder, branch or anything said in the conversation (your prompts and Claude's replies).
+  The ✕ in the box clears it.
 - **Status at a glance:** ● working, ◐ waiting for your input, ▸ plain shell, ○ not running.
 - **Notification when Claude waits.** When Claude finishes or asks you something in a tab you are not
   looking at, or while the window is in the background, you get a system notification.

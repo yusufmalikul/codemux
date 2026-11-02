@@ -4,7 +4,10 @@ use super::*;
 use super::accounts::account_badge;
 use super::ellipsis::ellipsis;
 use super::workspaces::{delete_workspace_confirm, workspace_header};
-use iced::widget::column;
+use iced::widget::{column, stack};
+
+/// Soft gray for small text that only adds detail.
+const MUTED: iced::Color = iced::Color::from_rgb8(0x80, 0x80, 0x88);
 
 fn section(label: &'static str) -> Element<'static, Message> {
     // Space above so each group stands apart from the rows of the group before it.
@@ -59,7 +62,7 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
 /// Small gray name of the tab's workspace. The title before it fills the
 /// row, so this sits at the right end.
 fn workspace_tag(name: &str) -> Element<'static, Message> {
-    text(name.to_string()).size(12).color(iced::Color::from_rgb8(0x80, 0x80, 0x88)).wrapping(text::Wrapping::None).into()
+    text(name.to_string()).size(12).color(MUTED).wrapping(text::Wrapping::None).into()
 }
 
 /// Dot color for a tab: amber when Claude waits for input (it needs you),
@@ -68,7 +71,7 @@ fn status_color(status: &str) -> iced::Color {
     match status {
         "waiting" => iced::Color::from_rgb8(0xf0, 0xb4, 0x29),
         "working" => iced::Color::from_rgb8(0x4c, 0xc3, 0x6a),
-        _ => iced::Color::from_rgb8(0x80, 0x80, 0x88),
+        _ => MUTED,
     }
 }
 
@@ -138,6 +141,23 @@ impl App {
         }
     }
 
+    /// The search box, with a clear button at its right end once it has text.
+    fn search_box(&self) -> Element<'_, Message> {
+        // Room on the right, so long text never runs under the button.
+        let padding = iced::Padding { top: 5.0, right: 28.0, bottom: 5.0, left: 5.0 };
+        let input = text_input(&self.search_placeholder(), &self.search)
+            .id(iced::widget::Id::new(SEARCH_INPUT))
+            .on_input(Message::Search)
+            .padding(padding)
+            .size(15);
+        let mut search = stack![input];
+        if !self.search.is_empty() {
+            let clear = button(text("✕").size(12)).padding([2, 8]).on_press(Message::SearchClear).style(button::text);
+            search = search.push(container(clear).align_right(Length::Fill).center_y(Length::Fill));
+        }
+        search.into()
+    }
+
     pub(super) fn sidebar(&self) -> Element<'_, Message> {
         // Explicit Fill: `lazy` reports Shrink, so the column would not grow by itself.
         let mut list = Column::new().spacing(2).width(Length::Fill);
@@ -170,14 +190,22 @@ impl App {
             _ => None,
         };
         let minute = Local::now().timestamp() / 60;
-        let deps =
-            (self.index_version, self.workspaces_version, self.search.clone(), selected_session, self.previously_open.clone(), tabs, minute);
-        list = list.push(lazy(deps, move |(_, _, _, _, _, tabs, _)| self.history_list(tabs)));
+        let deps = (
+            self.index_version,
+            self.workspaces_version,
+            self.search.clone(),
+            self.content_hits_version,
+            selected_session,
+            self.previously_open.clone(),
+            tabs,
+            minute,
+        );
+        list = list.push(lazy(deps, move |(_, _, _, _, _, _, tabs, _)| self.history_list(tabs)));
 
         let mac = cfg!(target_os = "macos");
         let key = |k: &str| if mac { format!("⌘{k}") } else { format!("Ctrl+Shift+{k}") };
         let mut top = column![row![
-            text_input(&self.search_placeholder(), &self.search).on_input(Message::Search).size(15),
+            self.search_box(),
             tooltip(
                 button(text("+").size(16)).padding([4, 12]).on_press(Message::ToggleAddMenu),
                 container(text("New session, terminal or workspace").size(12)).padding(6).style(container::rounded_box),
@@ -192,6 +220,9 @@ impl App {
         .spacing(6)
         .align_y(iced::Alignment::Center)]
         .spacing(6);
+        if self.content_searching {
+            top = top.push(text("Searching conversations…").size(12).color(MUTED));
+        }
         if self.add_menu {
             let item = |label: &str, shortcut: String, msg: Message| {
                 button(row![text(label.to_string()).size(14).width(Length::Fill), text(shortcut).size(12)])
@@ -280,7 +311,7 @@ impl App {
     }
 
     /// The search filter for a tab: its session's title, folder, branch and
-    /// last prompt, or for a plain terminal its title and folder.
+    /// conversation, or for a plain terminal its title and folder.
     fn tab_matches(&self, t: &TabRow, q: &str) -> bool {
         match t.session.as_deref().and_then(|s| self.index.listed(s)) {
             Some(m) => self.session_matches(m, q),
@@ -290,6 +321,7 @@ impl App {
 
     fn session_matches(&self, m: &SessionMeta, q: &str) -> bool {
         q.is_empty()
+            || self.content_hits.contains(&m.id)
             || [Some(self.session_title(m)), Some(m.title()), m.cwd.as_ref().map(|c| c.display().to_string()), m.git_branch.clone(), m.last_prompt.clone()]
                 .into_iter()
                 .flatten()

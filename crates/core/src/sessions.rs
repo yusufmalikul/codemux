@@ -5,10 +5,12 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 const TITLE_MAX: usize = 80;
@@ -17,6 +19,8 @@ const TITLE_MAX: usize = 80;
 pub const RECENT_MESSAGES: usize = 10;
 /// Longest stored recent message, in characters. Pastes and replies can be huge.
 const RECENT_MESSAGE_MAX: usize = 1000;
+/// Most threads one conversation search uses, so terminals stay smooth.
+const SEARCH_THREADS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -149,6 +153,21 @@ fn push_recent(list: &mut Vec<ChatMessage>, role: Role, text: String) {
     }
 }
 
+/// The typed prompt or Claude reply on a line, if it has one. Subagent
+/// (sidechain) and system-injected lines do not count.
+fn line_message(v: &Value) -> Option<(Role, String)> {
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    if flag("isSidechain") {
+        return None;
+    }
+    let message = v.get("message")?;
+    match v.get("type").and_then(Value::as_str)? {
+        "user" if !flag("isMeta") => user_text(message).map(|t| (Role::User, t)),
+        "assistant" => assistant_text(message).map(|t| (Role::Assistant, t)),
+        _ => None,
+    }
+}
+
 /// Apply one JSON line to the session meta.
 fn apply_line(meta: &mut SessionMeta, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
@@ -170,7 +189,7 @@ fn apply_line(meta: &mut SessionMeta, line: &str) {
                 meta.last_prompt = Some(t);
             }
         }
-        Some(kind @ ("user" | "assistant")) => {
+        Some("user" | "assistant") => {
             if let Some(cwd) = str_field("cwd") {
                 meta.cwd = Some(PathBuf::from(cwd));
             }
@@ -180,20 +199,11 @@ fn apply_line(meta: &mut SessionMeta, line: &str) {
             if let Some(ts) = str_field("timestamp").and_then(|t| t.parse::<DateTime<Utc>>().ok()) {
                 meta.last_activity = Some(meta.last_activity.map_or(ts, |old| old.max(ts)));
             }
-            let is_meta = v.get("isMeta").and_then(Value::as_bool).unwrap_or(false);
-            let is_side = v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false);
-            if kind == "user" && !is_meta && !is_side {
-                if let Some(t) = v.get("message").and_then(user_text) {
-                    if meta.first_prompt.is_none() {
-                        meta.first_prompt = Some(t.clone());
-                    }
-                    push_recent(&mut meta.recent_messages, Role::User, t);
+            if let Some((role, t)) = line_message(&v) {
+                if role == Role::User && meta.first_prompt.is_none() {
+                    meta.first_prompt = Some(t.clone());
                 }
-            }
-            if kind == "assistant" && !is_side {
-                if let Some(t) = v.get("message").and_then(assistant_text) {
-                    push_recent(&mut meta.recent_messages, Role::Assistant, t);
-                }
+                push_recent(&mut meta.recent_messages, role, t);
             }
         }
         _ => {}
@@ -211,6 +221,52 @@ pub fn parse_file(path: &Path) -> Option<SessionMeta> {
     }
     meta.modified = fs::metadata(path).and_then(|m| m.modified()).ok();
     Some(meta)
+}
+
+/// True if a typed prompt or Claude reply in the file contains `query`,
+/// which must be lowercase. Thinking and tool calls are left out, as in the
+/// detail view. Reads the file line by line, so a big one uses little memory.
+pub fn conversation_contains(path: &Path, query: &str, cancel: &AtomicBool) -> bool {
+    let Ok(file) = fs::File::open(path) else { return false };
+    let mut reader = std::io::BufReader::new(file);
+    // These characters are written as they are in JSON, so a line without
+    // the query can be skipped without the slow parse.
+    let literal = query.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ');
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if cancel.load(Ordering::Relaxed) || !matches!(reader.read_until(b'\n', &mut line), Ok(1..)) {
+            return false;
+        }
+        let text = String::from_utf8_lossy(&line);
+        if literal && !text.to_lowercase().contains(query) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        if line_message(&v).is_some_and(|(_, t)| t.to_lowercase().contains(query)) {
+            return true;
+        }
+    }
+}
+
+/// The IDs of the sessions whose conversation contains `query` (lowercase).
+/// `files` are (session ID, file) pairs. Setting `cancel` stops the search early.
+pub fn search_conversations(files: &[(String, PathBuf)], query: &str, cancel: &AtomicBool) -> HashSet<String> {
+    let next = AtomicUsize::new(0);
+    let hits = Mutex::new(HashSet::new());
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).min(SEARCH_THREADS);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                while let Some((id, path)) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if conversation_contains(path, query, cancel) {
+                        hits.lock().unwrap().insert(id.clone());
+                    }
+                }
+            });
+        }
+    });
+    hits.into_inner().unwrap()
 }
 
 /// Delete a session file and its sub-folder (subagent transcripts).
@@ -411,6 +467,50 @@ impl Index {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A session file with these lines, and the plain search of it.
+    fn search_file(lines: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        (dir, path)
+    }
+
+    const CONVERSATION: &[&str] = &[
+        r#"{"type":"user","message":{"content":"Please fix the \"Webhook\"\nretry, café"}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"secret thought"},{"type":"tool_use","name":"Bash","input":{"command":"tool command"}},{"type":"text","text":"Done with the Zebra"}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"tool output"}]}}"#,
+        r#"{"type":"user","isSidechain":true,"message":{"content":"subagent prompt"}}"#,
+        r#"{"type":"user","isMeta":true,"message":{"content":"injected text"}}"#,
+        "not json with lost words",
+    ];
+
+    #[test]
+    fn conversation_search_finds_prompts_and_replies_only() {
+        let (_dir, path) = search_file(CONVERSATION);
+        let cancel = AtomicBool::new(false);
+        let has = |q: &str| conversation_contains(&path, q, &cancel);
+        // Prompts and replies, in any case (the query comes in lowercase).
+        assert!(has("fix the"));
+        assert!(has("done with the zebra"));
+        // Text JSON writes escaped, or not as plain letters.
+        assert!(has("\"webhook\"\nretry"));
+        assert!(has("café"));
+        // Not part of the conversation.
+        for q in ["secret thought", "tool command", "tool output", "subagent prompt", "injected text", "lost words", "webhook retry"] {
+            assert!(!has(q), "{q} should not match");
+        }
+    }
+
+    #[test]
+    fn conversation_search_returns_the_matching_ids_and_can_stop() {
+        let (_a, zebra) = search_file(CONVERSATION);
+        let (_b, other) = search_file(&[r#"{"type":"user","message":{"content":"nothing here"}}"#]);
+        let files = vec![("zebra".to_string(), zebra), ("other".to_string(), other), ("gone".to_string(), PathBuf::from("/no/such/file"))];
+        let hits = search_conversations(&files, "zebra", &AtomicBool::new(false));
+        assert_eq!(hits, HashSet::from(["zebra".to_string()]));
+        assert!(search_conversations(&files, "zebra", &AtomicBool::new(true)).is_empty(), "a cancelled search found something");
+    }
 
     const FIXTURE: &str = r#"{"type":"user","sessionId":"s1","cwd":"/tmp/proj","gitBranch":"main","timestamp":"2026-10-13T08:00:00Z","isSidechain":false,"message":{"role":"user","content":"<command-name>/clear</command-name>"}}
 {"type":"user","sessionId":"s1","cwd":"/tmp/proj","gitBranch":"main","timestamp":"2026-10-13T08:01:00Z","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"fix the   webhook retry"}]}}

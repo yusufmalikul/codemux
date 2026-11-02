@@ -939,3 +939,69 @@ fn long_sidebar_names_are_cut_to_one_line() {
     assert!(name.0.ends_with('…'), "workspace name not cut: {:?}", name.0);
     assert!(header_after_frames(&mut app, vec![], &name.0, "(0)"), "count not shown after the cut name");
 }
+
+/// A session is found by words anywhere in its conversation, not only in
+/// its title or recent messages. Clearing the search shows everything again.
+#[test]
+fn search_finds_words_anywhere_in_a_conversation() {
+    let (dir, _) = fixture();
+    let cwd = dir.path().join("work");
+    let cwd = cwd.display();
+    let now = Utc::now().to_rfc3339();
+    let mut lines = vec![format!(
+        "{{\"type\":\"user\",\"sessionId\":\"s2\",\"cwd\":\"{cwd}\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"tell me about Zebra stripes\"}}}}"
+    )];
+    lines.push("{\"type\":\"ai-title\",\"aiTitle\":\"Animal talk\",\"sessionId\":\"s2\"}".to_string());
+    // Enough later messages that the first one is no longer kept in memory.
+    for _ in 0..sessions::RECENT_MESSAGES + 2 {
+        lines.push("{\"type\":\"user\",\"message\":{\"content\":\"next\"}}".to_string());
+    }
+    std::fs::write(dir.path().join("projects").join("-tmp-proj").join("s2.jsonl"), lines.join("\n") + "\n").unwrap();
+    let mut app = reopen(dir.path());
+    assert!(!app.index.get("s2").unwrap().recent_messages.iter().any(|m| m.text.contains("Zebra")));
+
+    let msgs = vec![Message::Search("zebra".into())];
+    assert!(found_after_frames(&mut app, msgs, "Animal talk"), "not found by its conversation");
+    assert!(!found_after_frames(&mut app, vec![], "Fix webhook retry"), "a session without the word is shown");
+    assert!(!app.content_searching, "still says it is searching");
+
+    // A new search replaces the old result.
+    assert!(!found_after_frames(&mut app, vec![Message::Search("no such word".into())], "Animal talk"));
+
+    assert!(found_after_frames(&mut app, vec![Message::Search(String::new())], "Animal talk"));
+    assert!(found_after_frames(&mut app, vec![], "Fix webhook retry"));
+}
+
+/// A slow search that finishes after the text changed must not show its result.
+#[test]
+fn old_conversation_search_results_are_thrown_away() {
+    let (_dir, mut app) = fixture();
+    let old = app.content_search_gen;
+    let _ = app.update(Message::Search("webhook".into()));
+    let _ = app.update(Message::ContentSearched(old, HashSet::from(["stale".to_string()])));
+    assert!(!app.content_hits.contains("stale"));
+}
+
+/// The ✕ in the search box empties it. It shows only when there is text,
+/// and the rest of the box still takes clicks and typing.
+#[test]
+fn search_box_clear_button_empties_it() {
+    let (_dir, mut app) = fixture();
+    assert!(!found_after_frames(&mut app, vec![], "✕"), "clear button shown with no text");
+    let _ = app.update(Message::Search("hello".into()));
+
+    let mut ui = iced_test::simulator(app.view());
+    ui.click("hello").expect("search text not on screen");
+    ui.typewrite("!");
+    let typed: Vec<Message> = ui.into_messages().collect();
+    assert!(typed.iter().any(|m| matches!(m, Message::Search(s) if s == "hello!")), "the box does not take typing: {typed:?}");
+
+    let mut ui = iced_test::simulator(app.view());
+    ui.click("✕").expect("no clear button");
+    let clicked: Vec<Message> = ui.into_messages().collect();
+    for m in clicked {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.search, "", "the search was not cleared");
+    assert!(!found_after_frames(&mut app, vec![], "✕"), "clear button stays after clearing");
+}
