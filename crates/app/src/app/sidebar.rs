@@ -185,6 +185,7 @@ impl App {
             })
             .collect();
         let open = self.open_list(&tabs);
+        let tabs_for_pinned: HashSet<String> = tabs.iter().filter_map(|t| t.session.clone()).collect();
         let selected_session = match &self.selected {
             Selected::Session(s) => Some(s.clone()),
             _ => None,
@@ -261,6 +262,9 @@ impl App {
 
         let scrolling = self.sidebar_scrolled.is_some();
         let mut sidebar = column![top].spacing(8);
+        if let Some(pinned) = self.pinned_list(&tabs_for_pinned) {
+            sidebar = sidebar.push(pinned);
+        }
         if let Some(open) = open {
             sidebar = sidebar.push(open);
         }
@@ -310,6 +314,31 @@ impl App {
         Some(container(list).max_height(OPEN_LIST_MAX_HEIGHT).into())
     }
 
+    /// Pinned sessions, in pin order, above the OPEN block. Like OPEN it
+    /// stays put while the tree scrolls. A pinned session open in a tab is
+    /// left out: it shows in OPEN. Nothing is shown when no pinned session
+    /// is left or none matches the search.
+    fn pinned_list(&self, open: &HashSet<String>) -> Option<Element<'static, Message>> {
+        let q = self.search.to_lowercase();
+        let rows: Vec<&SessionMeta> = self
+            .pinned
+            .iter()
+            .filter(|s| !open.contains(s.as_str()))
+            .filter_map(|s| self.index.listed(s))
+            .filter(|m| self.session_matches(m, &q))
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let mut list = column![section("PINNED")].spacing(2).width(Length::Fill);
+        for m in rows {
+            list = list.push(self.session_row(m));
+        }
+        let list = scrollable(list)
+            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)));
+        Some(container(list).max_height(PINNED_LIST_MAX_HEIGHT).into())
+    }
+
     /// The search filter for a tab: its session's title, folder, branch and
     /// conversation, or for a plain terminal its title and folder.
     fn tab_matches(&self, t: &TabRow, q: &str) -> bool {
@@ -339,11 +368,15 @@ impl App {
             .map_or(DEFAULT_WORKSPACE.to_string(), |w| w.name.clone())
     }
 
-    /// The sidebar tree: each workspace with its sessions. Open tabs are in
-    /// the OPEN block above, so a session open in a tab is left out here.
+    /// The sidebar tree: each workspace with its sessions. Open tabs and
+    /// pinned sessions are in the blocks above, so they are left out here.
     /// The workspace header still counts it and shows how many are open.
     pub(super) fn history_list(&self, tabs: &[TabRow]) -> Element<'static, Message> {
-        let active: HashSet<&str> = tabs.iter().filter_map(|t| t.session.as_deref()).collect();
+        // Pinned sessions are in the PINNED block above, so the tree leaves
+        // them out like open ones. They keep their workspace for when they
+        // are unpinned.
+        let active: HashSet<&str> =
+            tabs.iter().filter_map(|t| t.session.as_deref()).chain(self.pinned.iter().map(String::as_str)).collect();
         let mut list = Column::new().spacing(2).width(Length::Fill);
         let q = self.search.to_lowercase();
         let matches = |m: &SessionMeta| self.session_matches(m, &q);

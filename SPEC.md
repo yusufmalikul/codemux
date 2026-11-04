@@ -92,7 +92,10 @@ and the Claude Code terminal on the right.
 ### 6.1 Sidebar
 
 - Groups, from top to bottom:
-  1. **Pinned**
+  1. **Pinned**: sessions the user pinned, in pin order. Like Open, it stays above the tree and does
+     not scroll with it, and past a set height it scrolls on its own. A pinned session leaves the tree
+     (and its workspace count), but keeps its workspace for when it is unpinned. While it is open in a
+     tab it shows in Open instead. Pin/Unpin is a button in the session view and in a tab's header.
   2. **Open**: has a terminal running in the app (including a "New terminal" tab, even if it has not
      started Claude yet). One block for the tabs of all workspaces, in tab order (the ⌘1–9 order),
      each row with its workspace name. It stays above the tree and does not scroll with it, so
@@ -225,7 +228,7 @@ Stored in the per-OS data folder (`directories` crate):
 
 | File | Content |
 |---|---|
-| `state.json` | List of open sessions (tab order), selected session, window size, sidebar width |
+| `state.json` | List of open sessions (tab order), selected session, window size, sidebar width, pinned sessions |
 | `sessions.json` | Per session: pin, archive, local name, notes |
 | `index-cache.json` | Cached index result (safe to delete at any time) |
 | `status/` | Status files from the hook |

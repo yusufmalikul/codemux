@@ -30,6 +30,9 @@ impl App {
                         .spacing(8)
                         .align_y(iced::Alignment::Center)
                         .padding(8);
+                    if let Some(sid) = &tab.session_id {
+                        header = header.push(self.pin_button(sid, 12));
+                    }
                     if let Some(sid) = tab.session_id.as_ref().filter(|_| !self.accounts.is_empty() && tab.kind == TabKind::Claude) {
                         header = header.push(self.account_picker(sid, self.tab_account(tab), 12));
                     }
@@ -95,6 +98,7 @@ impl App {
                     } else {
                         row![
                             button(text("▶ Resume")).on_press(Message::Resume(m.id.clone())),
+                            self.pin_button(&m.id, TEXT_SIZE),
                             button(text("Delete")).on_press(Message::DeleteAsk(m.id.clone())).style(button::danger),
                         ]
                         .spacing(8)
@@ -146,6 +150,12 @@ impl App {
         // Own row under the body, so it never covers terminal text.
         let credit = container(text("Created by yusufmalikul").size(13)).width(Length::Fill).align_right(Length::Fill).padding([2, 8]);
         container(column![body, credit]).width(Length::Fill).height(Length::Fill).into()
+    }
+
+    /// "Pin" or "Unpin" for a session, to keep it at the top of the sidebar.
+    fn pin_button(&self, sid: &str, size: u32) -> Element<'static, Message> {
+        let label = if self.pinned.iter().any(|s| s == sid) { "Unpin" } else { "Pin" };
+        button(text(label).size(size)).on_press(Message::TogglePin(sid.to_string())).style(button::secondary).into()
     }
 
     /// A session's title with a "Rename" button, or the name box while it is

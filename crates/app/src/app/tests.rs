@@ -1005,3 +1005,79 @@ fn search_box_clear_button_empties_it() {
     assert_eq!(app.search, "", "the search was not cleared");
     assert!(!found_after_frames(&mut app, vec![], "✕"), "clear button stays after clearing");
 }
+
+/// Pinning a session puts it in a PINNED block at the top of the sidebar,
+/// above the OPEN block and the tree, and takes it out of the tree. The
+/// pin is remembered after restart. While the session is open in a tab it
+/// shows in OPEN only, and it comes back to PINNED when the tab closes.
+/// Unpinning puts it back in its workspace.
+#[test]
+fn pinned_sessions_stay_on_top_and_are_remembered() {
+    let (dir, _) = fixture();
+    let proj = dir.path().join("projects").join("-tmp-proj");
+    let now = Utc::now().to_rfc3339();
+    std::fs::write(
+        proj.join("s2.jsonl"),
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"s2\",\"cwd\":\"/tmp\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"hi\"}}}}\n\
+             {{\"type\":\"ai-title\",\"aiTitle\":\"Other task\",\"sessionId\":\"s2\"}}\n"
+        ),
+    )
+    .unwrap();
+    let mut app = reopen(dir.path());
+    let y_of = |texts: &[(String, iced::Rectangle)], t: &str| texts.iter().find(|(s, _)| s == t).map(|(_, b)| b.y);
+    let count = |texts: &[(String, iced::Rectangle)], t: &str| texts.iter().filter(|(s, _)| s == t).count();
+
+    // The detail view has a Pin button.
+    let _ = app.update(Message::SelectSession("s1".into()));
+    assert!(found_after_frames(&mut app, vec![], "Pin"), "no Pin button");
+    let _ = app.update(Message::NewTerminal);
+    app.selected = Selected::None;
+
+    let texts = texts_after_frames(&mut app, vec![Message::TogglePin("s1".into())]);
+    let pinned = y_of(&texts, "PINNED").expect("no PINNED block");
+    let open = y_of(&texts, "OPEN").expect("no OPEN block");
+    let s1 = y_of(&texts, "Fix webhook retry").expect("pinned session not shown");
+    let s2 = y_of(&texts, "Other task").expect("other session gone");
+    assert!(pinned < s1 && s1 < open && open < s2, "wrong order: pinned {pinned}, s1 {s1}, open {open}, s2 {s2}");
+    assert_eq!(count(&texts, "Fix webhook retry"), 1, "pinned session also shown in the tree");
+    // s2 plus the open terminal tab; the pinned s1 is not counted.
+    assert!(header_after_frames(&mut app, vec![], "▾ Default", "(2)  ● 1 open"), "tree still counts the pinned session");
+
+    // Remembered after restart.
+    let mut again = reopen(dir.path());
+    let texts = texts_after_frames(&mut again, vec![]);
+    assert!(y_of(&texts, "PINNED") < y_of(&texts, "Fix webhook retry"), "pin not remembered");
+
+    // Open in a tab: shown in OPEN only. Closed again: back in PINNED.
+    let _ = again.update(Message::NewTerminal);
+    again.tabs[0].session_id = Some("s1".into());
+    again.adopt_tab_sessions();
+    again.selected = Selected::None;
+    let texts = texts_after_frames(&mut again, vec![]);
+    assert_eq!(count(&texts, "Fix webhook retry"), 1, "open pinned session shown twice");
+    assert!(y_of(&texts, "PINNED").is_none(), "empty PINNED block shown");
+    let tab = again.tabs[0].id;
+    let texts = texts_after_frames(&mut again, vec![Message::CloseTabConfirm(tab)]);
+    assert!(y_of(&texts, "PINNED") < y_of(&texts, "Fix webhook retry"), "not back in PINNED after close");
+
+    // Search hides a pinned session that does not match.
+    assert!(!found_after_frames(&mut again, vec![Message::Search("other".into())], "PINNED"), "PINNED shown for no match");
+    let _ = again.update(Message::Search(String::new()));
+
+    // Unpin: back in the tree, and no PINNED block.
+    let texts = texts_after_frames(&mut again, vec![Message::TogglePin("s1".into())]);
+    assert!(y_of(&texts, "PINNED").is_none(), "PINNED block left after unpin");
+    assert!(y_of(&texts, "Fix webhook retry").is_some(), "unpinned session not back in the tree");
+    assert!(reopen(dir.path()).pinned.is_empty(), "unpin not saved");
+}
+
+/// Deleting a pinned session also removes its pin.
+#[test]
+fn deleting_a_pinned_session_drops_its_pin() {
+    let (dir, mut app) = fixture();
+    let _ = app.update(Message::TogglePin("s1".into()));
+    let _ = app.update(Message::DeleteConfirm("s1".into()));
+    assert!(app.pinned.is_empty());
+    assert!(reopen(dir.path()).pinned.is_empty());
+}

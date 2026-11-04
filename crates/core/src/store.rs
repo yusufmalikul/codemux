@@ -33,6 +33,10 @@ pub struct AppState {
     /// Extra Claude accounts. The default account (`~/.claude`) is not listed.
     #[serde(default)]
     pub accounts: Vec<Account>,
+    /// Pinned session IDs, in the order they were pinned. Shown in the
+    /// PINNED block at the top of the sidebar.
+    #[serde(default)]
+    pub pinned: Vec<String>,
 }
 
 /// A Claude account: its own Claude Code config folder (`CLAUDE_CONFIG_DIR`),
@@ -92,7 +96,8 @@ mod tests {
         let s = AppState { version: 0, open_sessions: vec!["a".into(), "b".into()], hide_sidebar: true, sidebar_width: Some(420.0),
             workspaces: vec![Workspace { id: 1, name: "Work".into(), sessions: vec!["a".into()], collapsed: true }],
             default_collapsed: true, session_names: BTreeMap::from([("a".into(), "My name".into())]),
-            accounts: vec![Account { id: 1, name: "Pro".into(), config_dir: "/home/me/.claude-pro".into() }] };
+            accounts: vec![Account { id: 1, name: "Pro".into(), config_dir: "/home/me/.claude-pro".into() }],
+            pinned: vec!["b".into()] };
         s.save(&p).unwrap();
         let loaded = AppState::load(&p);
         assert_eq!(loaded.open_sessions, s.open_sessions);
@@ -102,6 +107,7 @@ mod tests {
         assert!(loaded.default_collapsed);
         assert_eq!(loaded.session_names, s.session_names);
         assert_eq!(loaded.accounts, s.accounts);
+        assert_eq!(loaded.pinned, s.pinned);
         assert_eq!(loaded.version, STATE_VERSION);
         assert!(!p.with_extension("tmp").exists());
     }

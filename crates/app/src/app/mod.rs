@@ -55,6 +55,8 @@ const TREE_INDENT: f32 = 16.0;
 /// Past this height the OPEN block in the sidebar scrolls on its own, so
 /// many open tabs never hide the session tree below it.
 const OPEN_LIST_MAX_HEIGHT: f32 = 360.0;
+/// Past this height the PINNED block scrolls on its own, for the same reason.
+const PINNED_LIST_MAX_HEIGHT: f32 = 240.0;
 
 /// Text size of sidebar rows. The session detail view uses it too, so both read the same.
 const TEXT_SIZE: u32 = 16;
@@ -224,6 +226,8 @@ pub(crate) struct App {
     session_names: BTreeMap<String, String>,
     /// Session being renamed, and the text typed so far.
     renaming: Option<(String, String)>,
+    /// Pinned session IDs, in pin order (saved in state.json).
+    pinned: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -291,6 +295,8 @@ pub(crate) enum Message {
     /// Save the typed name. An empty name goes back to Claude's title.
     RenameSave,
     RenameCancel,
+    /// Pin a session to the top of the sidebar, or unpin it.
+    TogglePin(String),
     ShowAccounts,
     NewAccountStart,
     NewAccountName(String),
@@ -441,6 +447,7 @@ impl App {
             add_menu: false,
             session_names: state.session_names,
             renaming: None,
+            pinned: state.pinned,
         }
     }
 
@@ -525,6 +532,7 @@ impl App {
             default_collapsed: self.default_collapsed,
             session_names: self.session_names.clone(),
             accounts: self.accounts.clone(),
+            pinned: self.pinned.clone(),
         }
         .save(path);
     }
@@ -890,6 +898,15 @@ impl App {
                     self.workspaces_changed();
                 }
             }
+            Message::TogglePin(sid) => {
+                if self.pinned.contains(&sid) {
+                    self.pinned.retain(|s| s != &sid);
+                } else {
+                    self.pinned.push(sid);
+                }
+                // Pinned sessions leave the cached sidebar tree.
+                self.workspaces_changed();
+            }
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
                 for tab in &mut self.tabs {
@@ -944,6 +961,7 @@ impl App {
                     w.sessions.retain(|s| s != sid);
                 }
                 self.session_names.remove(sid);
+                self.pinned.retain(|s| s != sid);
                 self.workspaces_version += 1;
                 if self.selected == Selected::Session(sid.to_string()) {
                     self.selected = Selected::None;
