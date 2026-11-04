@@ -932,7 +932,7 @@ impl App {
             Message::SwitchAccount(sid, to) => return self.switch_account(sid, to),
             Message::SwitchCheck => return self.switch_check(),
             Message::SelectIndex(i) => {
-                if let Some(id) = self.tabs.get(i).map(|t| t.id) {
+                if let Some(&id) = self.tab_order().get(i) {
                     self.selected = Selected::Tab(id);
                     return self.focus_tab(id);
                 }
@@ -1022,6 +1022,19 @@ impl App {
         if self.confirm_delete_workspace.take().is_some() {
             self.workspaces_version += 1;
         }
+    }
+
+    /// Tab IDs in the order the sidebar shows them, which is the ⌘1–9
+    /// order: pinned tabs first (in pin order), then the rest in tab order.
+    fn tab_order(&self) -> Vec<u64> {
+        let pinned = self.pinned.iter().filter_map(|sid| self.tabs.iter().find(|t| t.session_id.as_ref() == Some(sid)));
+        let rest = self.tabs.iter().filter(|t| !self.is_pinned_tab(t.session_id.as_deref()));
+        pinned.chain(rest).map(|t| t.id).collect()
+    }
+
+    /// The tab's session is pinned, so the tab shows in PINNED, not OPEN.
+    fn is_pinned_tab(&self, session: Option<&str>) -> bool {
+        session.is_some_and(|sid| self.pinned.iter().any(|p| p == sid))
     }
 
     fn close_tab(&mut self, id: u64) -> Task<Message> {

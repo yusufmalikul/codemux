@@ -36,7 +36,8 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 ### Sessions
 
 - **Pin sessions.** Press **Pin** on a session (or in a tab's header) to keep it in a PINNED block
-  at the very top of the sidebar, above the open tabs. Pins are remembered after a restart.
+  at the very top of the sidebar, above the open tabs. It stays there while it is open in a tab, and
+  ⌘1–9 counts pinned tabs first. Pins are remembered after a restart.
 - **Open tabs on top.** Every open tab, from every workspace, is in one OPEN block at the top of the sidebar,
   with its workspace name. It does not scroll away, so you can switch tabs without scrolling.
 - **Sidebar with every session.** Sessions are grouped into Previously open, Today, Yesterday,

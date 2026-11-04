@@ -184,8 +184,8 @@ impl App {
                 }
             })
             .collect();
+        let pinned = self.pinned_list(&tabs);
         let open = self.open_list(&tabs);
-        let tabs_for_pinned: HashSet<String> = tabs.iter().filter_map(|t| t.session.clone()).collect();
         let selected_session = match &self.selected {
             Selected::Session(s) => Some(s.clone()),
             _ => None,
@@ -262,7 +262,7 @@ impl App {
 
         let scrolling = self.sidebar_scrolled.is_some();
         let mut sidebar = column![top].spacing(8);
-        if let Some(pinned) = self.pinned_list(&tabs_for_pinned) {
+        if let Some(pinned) = pinned {
             sidebar = sidebar.push(pinned);
         }
         if let Some(open) = open {
@@ -293,13 +293,14 @@ impl App {
         .into()
     }
 
-    /// Every open tab, in tab order (the ⌘1–9 order), from all workspaces.
-    /// It sits above the tree and does not scroll with it, so switching
-    /// between tabs of different workspaces never needs a scroll. Nothing
-    /// is shown when no tab is open or none matches the search.
+    /// Every open tab that is not pinned (pinned ones are in PINNED), in
+    /// tab order, from all workspaces. It sits above the tree and does not
+    /// scroll with it, so switching between tabs of different workspaces
+    /// never needs a scroll. Nothing is shown when no such tab is open or
+    /// none matches the search.
     fn open_list(&self, tabs: &[TabRow]) -> Option<Element<'static, Message>> {
         let q = self.search.to_lowercase();
-        let rows: Vec<&TabRow> = tabs.iter().filter(|t| self.tab_matches(t, &q)).collect();
+        let rows: Vec<&TabRow> = tabs.iter().filter(|t| !self.is_pinned_tab(t.session.as_deref()) && self.tab_matches(t, &q)).collect();
         if rows.is_empty() {
             return None;
         }
@@ -315,24 +316,27 @@ impl App {
     }
 
     /// Pinned sessions, in pin order, above the OPEN block. Like OPEN it
-    /// stays put while the tree scrolls. A pinned session open in a tab is
-    /// left out: it shows in OPEN. Nothing is shown when no pinned session
-    /// is left or none matches the search.
-    fn pinned_list(&self, open: &HashSet<String>) -> Option<Element<'static, Message>> {
+    /// stays put while the tree scrolls. A pinned session open in a tab
+    /// shows here as its tab, not in OPEN. Nothing is shown when no pinned
+    /// session is listed or none matches the search.
+    fn pinned_list(&self, tabs: &[TabRow]) -> Option<Element<'static, Message>> {
         let q = self.search.to_lowercase();
-        let rows: Vec<&SessionMeta> = self
-            .pinned
-            .iter()
-            .filter(|s| !open.contains(s.as_str()))
-            .filter_map(|s| self.index.listed(s))
-            .filter(|m| self.session_matches(m, &q))
-            .collect();
+        let mut rows = Vec::new();
+        for sid in &self.pinned {
+            if let Some(t) = tabs.iter().find(|t| t.session.as_deref() == Some(sid.as_str())) {
+                if self.tab_matches(t, &q) {
+                    rows.push(tab_row(t));
+                }
+            } else if let Some(m) = self.index.listed(sid).filter(|m| self.session_matches(m, &q)) {
+                rows.push(self.session_row(m));
+            }
+        }
         if rows.is_empty() {
             return None;
         }
         let mut list = column![section("PINNED")].spacing(2).width(Length::Fill);
-        for m in rows {
-            list = list.push(self.session_row(m));
+        for r in rows {
+            list = list.push(r);
         }
         let list = scrollable(list)
             .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)));

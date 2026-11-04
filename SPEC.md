@@ -95,8 +95,10 @@ and the Claude Code terminal on the right.
   1. **Pinned**: sessions the user pinned, in pin order. Like Open, it stays above the tree and does
      not scroll with it, and past a set height it scrolls on its own. A pinned session leaves the tree
      (and its workspace count), but keeps its workspace for when it is unpinned. While it is open in a
-     tab it shows in Open instead. Pin/Unpin is a button in the session view and in a tab's header.
-  2. **Open**: has a terminal running in the app (including a "New terminal" tab, even if it has not
+     tab it stays here, shown as its tab (bold, with a close button), not in Open. ⌘1–9 counts pinned
+     tabs first, then the Open tabs, so the shortcut order matches the screen. Pin/Unpin is a button in
+     the session view and in a tab's header.
+  2. **Open**: not pinned, and has a terminal running in the app (including a "New terminal" tab, even if it has not
      started Claude yet). One block for the tabs of all workspaces, in tab order (the ⌘1–9 order),
      each row with its workspace name. It stays above the tree and does not scroll with it, so
      switching between tabs never needs a scroll. Past a set height it scrolls on its own.

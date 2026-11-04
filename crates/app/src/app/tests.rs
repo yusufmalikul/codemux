@@ -1008,9 +1008,9 @@ fn search_box_clear_button_empties_it() {
 
 /// Pinning a session puts it in a PINNED block at the top of the sidebar,
 /// above the OPEN block and the tree, and takes it out of the tree. The
-/// pin is remembered after restart. While the session is open in a tab it
-/// shows in OPEN only, and it comes back to PINNED when the tab closes.
-/// Unpinning puts it back in its workspace.
+/// pin is remembered after restart. It stays in PINNED while it is open in
+/// a tab too, and stays there when the tab closes. Unpinning puts it back
+/// in its workspace.
 #[test]
 fn pinned_sessions_stay_on_top_and_are_remembered() {
     let (dir, _) = fixture();
@@ -1049,17 +1049,34 @@ fn pinned_sessions_stay_on_top_and_are_remembered() {
     let texts = texts_after_frames(&mut again, vec![]);
     assert!(y_of(&texts, "PINNED") < y_of(&texts, "Fix webhook retry"), "pin not remembered");
 
-    // Open in a tab: shown in OPEN only. Closed again: back in PINNED.
+    // Open in a tab after an unpinned tab: it stays in PINNED, above the
+    // OPEN block, and is the first tab for the 1–9 shortcut.
     let _ = again.update(Message::NewTerminal);
-    again.tabs[0].session_id = Some("s1".into());
+    let plain = again.tabs[0].id;
+    let _ = again.update(Message::NewTerminal);
+    again.tabs[1].session_id = Some("s1".into());
     again.adopt_tab_sessions();
+    let pinned_tab = again.tabs[1].id;
     again.selected = Selected::None;
+    let (plain_title, _) = again.tab_title(&again.tabs[0]);
     let texts = texts_after_frames(&mut again, vec![]);
     assert_eq!(count(&texts, "Fix webhook retry"), 1, "open pinned session shown twice");
-    assert!(y_of(&texts, "PINNED").is_none(), "empty PINNED block shown");
-    let tab = again.tabs[0].id;
-    let texts = texts_after_frames(&mut again, vec![Message::CloseTabConfirm(tab)]);
-    assert!(y_of(&texts, "PINNED") < y_of(&texts, "Fix webhook retry"), "not back in PINNED after close");
+    let pinned = y_of(&texts, "PINNED").expect("open pinned session left PINNED");
+    let s1 = y_of(&texts, "Fix webhook retry").unwrap();
+    let open = y_of(&texts, "OPEN").expect("no OPEN block for the plain tab");
+    let plain_y = y_of(&texts, &plain_title).expect("plain tab not shown");
+    assert!(pinned < s1 && s1 < open && open < plain_y, "wrong order: pinned {pinned}, s1 {s1}, open {open}, plain {plain_y}");
+    let _ = again.update(Message::SelectIndex(0));
+    assert_eq!(again.selected, Selected::Tab(pinned_tab), "first shortcut is not the pinned tab");
+    let _ = again.update(Message::SelectIndex(1));
+    assert_eq!(again.selected, Selected::Tab(plain), "second shortcut is not the plain tab");
+
+    // Only pinned tabs open: no empty OPEN block.
+    let _ = again.update(Message::CloseTabConfirm(plain));
+    again.selected = Selected::None;
+    assert!(!found_after_frames(&mut again, vec![], "OPEN"), "empty OPEN block shown");
+    let texts = texts_after_frames(&mut again, vec![Message::CloseTabConfirm(pinned_tab)]);
+    assert!(y_of(&texts, "PINNED") < y_of(&texts, "Fix webhook retry"), "not in PINNED after close");
 
     // Search hides a pinned session that does not match.
     assert!(!found_after_frames(&mut again, vec![Message::Search("other".into())], "PINNED"), "PINNED shown for no match");
