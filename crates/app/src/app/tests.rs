@@ -1325,3 +1325,75 @@ fn terminal_tabs_can_be_renamed() {
     }
     assert_eq!(again.tab_title(&again.tabs[0]).0, default, "empty name did not reset");
 }
+
+/// While Claude works, the tab header has a Stop button that sends Ctrl+C,
+/// the way Claude is interrupted from the keyboard. The tab stays open.
+/// When nothing runs, there is no Stop button. Close is a quiet ✕.
+#[test]
+fn stop_button_sends_ctrl_c_while_claude_works() {
+    let (dir, mut app) = fixture();
+    // Like Claude: Ctrl+C reaches it as SIGINT, and it keeps running.
+    fake_claude_tab(&mut app, dir.path(), "trap 'touch stopped' INT", "while :; do sleep 0.05; done");
+    let id = app.tabs[0].id;
+    assert!(!found_after_frames(&mut app, vec![], "■ Stop"), "Stop shown while Claude waits");
+    assert!(!found_after_frames(&mut app, vec![], "■ Close"), "the loud Close button is still there");
+
+    app.tabs[0].busy = Some(true);
+    let mut ui = iced_test::simulator(app.view());
+    ui.click("■ Stop").expect("no Stop button while Claude works");
+    let clicked: Vec<Message> = ui.into_messages().collect();
+    assert!(clicked.iter().any(|m| matches!(m, Message::StopTab(t) if *t == id)), "{clicked:?}");
+    for m in clicked {
+        let _ = app.update(m);
+    }
+    let start = Instant::now();
+    while !dir.path().join("stopped").exists() && start.elapsed() < SWITCH_TIMEOUT {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(dir.path().join("stopped").exists(), "Claude did not get Ctrl+C");
+    assert_eq!(app.tabs.len(), 1, "Stop closed the tab");
+}
+
+/// A tab whose Claude started waiting while the user looked elsewhere
+/// (counted on the Dock) is marked "unread" in the sidebar until the user
+/// opens it. ⌘J (Ctrl+Shift+J off macOS) goes to the next unread tab, in
+/// sidebar order.
+#[test]
+fn unread_tabs_are_marked_and_reached_with_cmd_j() {
+    let app_keys = if cfg!(target_os = "macos") { keyboard::Modifiers::LOGO } else { keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT };
+    let msg = shortcut(key_press("j", app_keys), iced::event::Status::Ignored, iced::window::Id::unique());
+    assert!(matches!(msg, Some(Message::NextUnread)), "{msg:?}");
+
+    let (_dir, mut app) = fixture();
+    for _ in 0..3 {
+        let _ = app.update(Message::NewTerminal);
+    }
+    let title = |id: u64, t: &str| {
+        Message::Terminal(term::Event::BackendCall(id, term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Title(t.into()))))
+    };
+    let ids: Vec<u64> = app.tabs.iter().map(|t| t.id).collect();
+    for t in &mut app.tabs {
+        t.kind = TabKind::Claude;
+    }
+    let unread = |app: &mut App| texts_after_frames(app, vec![]).iter().filter(|(t, _)| t == "unread").count();
+    assert_eq!(unread(&mut app), 0, "unread shown before any work");
+
+    // The first and the last tab finish while the user looks elsewhere.
+    let _ = app.update(Message::SelectSession("s1".into()));
+    for id in [ids[0], ids[2]] {
+        let _ = app.update(title(id, "◐ Work"));
+        let _ = app.update(title(id, "✳ Work"));
+    }
+    assert_eq!(unread(&mut app), 2, "unread tabs not marked");
+
+    // ⌘J goes to them in order; each one opened loses its mark.
+    let _ = app.update(Message::NextUnread);
+    assert_eq!(app.selected, Selected::Tab(ids[0]));
+    assert_eq!(unread(&mut app), 1, "opened tab still marked");
+    let _ = app.update(Message::NextUnread);
+    assert_eq!(app.selected, Selected::Tab(ids[2]));
+    assert_eq!(unread(&mut app), 0);
+    // Nothing unread: ⌘J stays where it is.
+    let _ = app.update(Message::NextUnread);
+    assert_eq!(app.selected, Selected::Tab(ids[2]));
+}

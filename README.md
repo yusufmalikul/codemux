@@ -51,11 +51,14 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 - **Status at a glance:** ● working, ◐ waiting for your input, ▸ plain shell, ○ not running.
 - **Notification when Claude waits.** When Claude finishes or asks you something in a tab you are not
   looking at, or while the window is in the background, you get a system notification.
-  On macOS, the Dock icon shows how many waiting tabs you have not looked at yet.
+  On macOS, the Dock icon shows how many waiting tabs you have not looked at yet. In the sidebar those tabs
+  have a yellow **unread** tag, and ⌘J goes to the next one.
 - **New session:** pick a folder and Claude starts there right away.
 - **Continue an old session** with one click (`claude --resume` under the hood).
 - **Rename** a session (a local label, only in Codemux), or a terminal tab from its header.
 - **Delete** a session for good, after you confirm. A running session can't be deleted.
+- **Stop** Claude's work with the ■ Stop button in the tab header (it shows only while Claude works, and
+  sends Ctrl+C). The quiet ✕ next to it closes the tab and ends its process.
 
 ### Workspaces
 
@@ -98,6 +101,7 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 | Close tab | ⌘W | Ctrl+Shift+W |
 | Hide or show sidebar | ⌘B | Ctrl+Shift+B |
 | Search sessions | ⌘⇧F | Ctrl+Shift+F |
+| Go to the next unread tab | ⌘J | Ctrl+Shift+J |
 | Go to session 1–9 | ⌘1–⌘9 | Ctrl+Shift+1–9 |
 
 App shortcuts never take keys that Claude Code needs in the terminal.

@@ -482,7 +482,7 @@ Done:
 Not yet (put off on purpose):
 - `notify` watcher (still polling every 1.5 seconds for now, and the index already reads step by step).
 - Hook, detection of sessions outside the app, red error status, right-click menu, pin/archive/rename.
-- Terminal fixes T4–T8, T12. Stop button with Ctrl+C (right now "Close" kills the PTY).
+- Terminal fixes T4–T8, T12.
 - `index-cache.json`, `fake-tui` e2e, CI, release packages.
 
 **Ideas for v2:** per-session notes, automatic summaries, OS notifications, WSL support, split view (2 terminals side by side), cost stats from `cost-state`.

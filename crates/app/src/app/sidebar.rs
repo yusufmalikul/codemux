@@ -34,16 +34,22 @@ pub(super) struct TabRow {
     why: Option<String>,
     /// The pinned terminal this tab runs, if any.
     terminal_pin: Option<u64>,
+    /// Claude started waiting while the user looked elsewhere, and they
+    /// have not opened the tab since (the tabs counted on the Dock).
+    unread: bool,
 }
 
 fn tab_row(t: &TabRow, query: &str) -> Element<'static, Message> {
     let mut label = row![
-        text("●").size(12).color(status_color(t.status)),
+        text("●").size(12).color(status_color(t.status, t.unread)),
         row_label(t.title.clone(), true, query),
         account_badge(&t.account),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
+    if t.unread {
+        label = label.push(unread_tag());
+    }
     if !t.workspace_name.is_empty() {
         label = label.push(workspace_tag(&t.workspace_name));
     }
@@ -70,11 +76,25 @@ fn workspace_tag(name: &str) -> Element<'static, Message> {
     text(name.to_string()).size(12).color(MUTED).wrapping(text::Wrapping::None).into()
 }
 
-/// Dot color for a tab: amber when Claude waits for input (it needs you),
-/// green while it works, gray for a plain shell.
-fn status_color(status: &str) -> iced::Color {
+/// Amber: Claude waits for the user.
+const WAITING: iced::Color = iced::Color::from_rgb8(0xf0, 0xb4, 0x29);
+
+/// Small amber "unread" tag: Claude finished while the user looked
+/// elsewhere, and they have not opened the tab since.
+fn unread_tag() -> Element<'static, Message> {
+    container(text("unread").size(11).color(iced::Color::BLACK).wrapping(text::Wrapping::None))
+        .padding([1, 6])
+        .style(|_: &iced::Theme| container::Style { background: Some(WAITING.into()), border: iced::border::rounded(8), ..container::Style::default() })
+        .into()
+}
+
+/// Dot color for a tab: bright amber when Claude waits for input and the
+/// user has not seen it yet, soft amber when it waits and they have, green
+/// while it works, gray for a plain shell.
+fn status_color(status: &str, unread: bool) -> iced::Color {
     match status {
-        "waiting" => iced::Color::from_rgb8(0xf0, 0xb4, 0x29),
+        "waiting" if unread => WAITING,
+        "waiting" => WAITING.scale_alpha(0.5),
         "working" => iced::Color::from_rgb8(0x4c, 0xc3, 0x6a),
         _ => MUTED,
     }
@@ -198,6 +218,7 @@ impl App {
                     selected: self.selected == Selected::Tab(tab.id),
                     why: self.tab_why(tab),
                     terminal_pin: tab.terminal_pin,
+                    unread: tab.unseen,
                 }
             })
             .collect();

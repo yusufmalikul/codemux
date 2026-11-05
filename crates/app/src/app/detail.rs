@@ -57,7 +57,27 @@ impl App {
                             .align_y(iced::Alignment::Center),
                         )
                     } else {
-                        header.push(button(text("■ Close").size(12)).on_press(Message::CloseTab(tab.id)).style(button::danger))
+                        let mac = cfg!(target_os = "macos");
+                        let close_key = if mac { "⌘W" } else { "Ctrl+Shift+W" };
+                        let tip = |label: String| container(text(label).size(12)).padding(6).style(container::rounded_box);
+                        // Stop only while Claude works, so it is never a
+                        // button that does nothing.
+                        let header = if self.tab_status(tab) == "working" {
+                            header.push(tooltip(
+                                button(text("■ Stop").size(12)).on_press(Message::StopTab(tab.id)).style(button::secondary),
+                                tip("Stop Claude's work (sends Ctrl+C)".into()),
+                                tooltip::Position::Bottom,
+                            ))
+                        } else {
+                            header
+                        };
+                        // Quiet until hovered (then red, see close_style):
+                        // closing is rare, and it ends the process.
+                        header.push(tooltip(
+                            button(text("✕").size(14)).padding([4, 10]).on_press(Message::CloseTab(tab.id)).style(close_style),
+                            tip(format!("Close tab ({close_key})")),
+                            tooltip::Position::Bottom,
+                        ))
                     };
                     column![header, rule::horizontal(1), term::TerminalView::show(&tab.term).map(Message::Terminal)]
                         .into()

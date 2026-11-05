@@ -285,6 +285,8 @@ pub(crate) enum Message {
     /// Close a tab even though Claude still works in it.
     CloseTabConfirm(u64),
     CloseTabCancel,
+    /// Send Ctrl+C to a tab, to stop what Claude (or the shell) is doing.
+    StopTab(u64),
     /// Cancel whatever inline input or question is open.
     Escape,
     Search(String),
@@ -294,6 +296,8 @@ pub(crate) enum Message {
     ContentSearched(u64, HashMap<String, String>),
     /// Go to the sidebar search box (⌘⇧F), showing the sidebar if hidden.
     FocusSearch,
+    /// Go to the first unread tab in sidebar order (⌘J).
+    NextUnread,
     SelectIndex(usize),
     ScaleFactor(f32),
     DeleteAsk(String),
@@ -399,6 +403,7 @@ fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::win
             "t" => Some(Message::NewTerminal),
             "w" => Some(Message::CloseSelected),
             "b" => Some(Message::ToggleHideSidebar),
+            "j" => Some(Message::NextUnread),
             // ⌘⇧F on macOS. Off macOS every app key already has Shift.
             "f" if modifiers.shift() => Some(Message::FocusSearch),
             d if d.len() == 1 && ('1'..='9').contains(&d.chars().next()?) => {
@@ -835,6 +840,14 @@ impl App {
                 return self.close_tab(id);
             }
             Message::CloseTabCancel => self.confirm_close_tab = None,
+            Message::StopTab(id) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    // Ctrl+C, as if typed: the terminal turns it into SIGINT
+                    // for the program in front, and Claude stops its work.
+                    tab.term.handle(term::Command::ProxyToBackend(term::BackendCommand::Write(vec![0x03])));
+                    return self.focus_tab(id);
+                }
+            }
             Message::Escape => self.cancel_inline(),
             Message::Search(s) => {
                 self.search = s;
@@ -843,6 +856,13 @@ impl App {
             Message::SearchClear => {
                 let search = self.update(Message::Search(String::new()));
                 return Task::batch([search, iced::widget::operation::focus(iced::widget::Id::new(SEARCH_INPUT))]);
+            }
+            Message::NextUnread => {
+                let unread = self.tab_order().into_iter().find(|id| self.tabs.iter().any(|t| t.id == *id && t.unseen));
+                if let Some(id) = unread {
+                    self.selected = Selected::Tab(id);
+                    return self.focus_tab(id);
+                }
             }
             Message::FocusSearch => {
                 if self.hide_sidebar {
