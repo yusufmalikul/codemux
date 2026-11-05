@@ -5,6 +5,11 @@ use super::*;
 use super::sidebar::{close_style, relative_time};
 use iced::widget::{column, stack};
 
+/// "Pin" or "Unpin", sending `msg`.
+fn pin_toggle(pinned: bool, msg: Message, size: u32) -> Element<'static, Message> {
+    button(text(if pinned { "Unpin" } else { "Pin" }).size(size)).on_press(msg).style(button::secondary).into()
+}
+
 fn empty_state<'a>() -> Element<'a, Message> {
     container(text("Pick a session on the left, or start a New session / New terminal.").size(14))
         .center(Length::Fill)
@@ -22,17 +27,20 @@ impl App {
                     if let Some(b) = meta.and_then(|m| m.git_branch.clone()) {
                         info.push(b);
                     }
-                    let heading: Element<'_, Message> = match &tab.session_id {
-                        Some(sid) => self.title_or_rename(sid, title, 15, 12),
-                        None => text(title).size(15).into(),
+                    let terminal = self.is_terminal_tab(tab);
+                    let target = match &tab.session_id {
+                        Some(sid) if !terminal => Rename::Session(sid.clone()),
+                        _ => Rename::Tab(tab.id),
                     };
+                    let heading = self.title_or_rename(target, title, 15, 12);
                     let mut header = row![column![heading, text(info.join(" · ")).size(11)].width(Length::Fill)]
                         .spacing(8)
                         .align_y(iced::Alignment::Center)
                         .padding(8);
-                    if let Some(sid) = &tab.session_id {
-                        header = header.push(self.pin_button(sid, 12));
-                    }
+                    header = header.push(match &tab.session_id {
+                        Some(sid) if !terminal => self.pin_button(sid, 12),
+                        _ => pin_toggle(tab.terminal_pin.is_some(), Message::TogglePinTab(tab.id), 12),
+                    });
                     if let Some(sid) = tab.session_id.as_ref().filter(|_| !self.accounts.is_empty() && tab.kind == TabKind::Claude) {
                         header = header.push(self.account_picker(sid, self.tab_account(tab), 12));
                     }
@@ -59,7 +67,7 @@ impl App {
             Selected::Session(sid) => match self.index.get(sid) {
                 Some(m) => {
                     let mut col = column![
-                        self.title_or_rename(&m.id, self.session_title(m), 22, SMALL_TEXT_SIZE),
+                        self.title_or_rename(Rename::Session(m.id.clone()), self.session_title(m), 22, SMALL_TEXT_SIZE),
                         text(m.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default()).size(TEXT_SIZE),
                     ]
                     .spacing(8);
@@ -154,16 +162,19 @@ impl App {
 
     /// "Pin" or "Unpin" for a session, to keep it at the top of the sidebar.
     fn pin_button(&self, sid: &str, size: u32) -> Element<'static, Message> {
-        let label = if self.pinned.iter().any(|s| s == sid) { "Unpin" } else { "Pin" };
-        button(text(label).size(size)).on_press(Message::TogglePin(sid.to_string())).style(button::secondary).into()
+        pin_toggle(self.is_session_pinned(sid), Message::TogglePin(sid.to_string()), size)
     }
 
-    /// A session's title with a "Rename" button, or the name box while it is
-    /// being renamed.
-    pub(super) fn title_or_rename(&self, sid: &str, title: String, size: u32, button_size: u32) -> Element<'_, Message> {
-        if let Some((_, typed)) = self.renaming.as_ref().filter(|(s, _)| s == sid) {
+    /// A session's or terminal's title with a "Rename" button, or the name
+    /// box while it is being renamed.
+    pub(super) fn title_or_rename(&self, target: Rename, title: String, size: u32, button_size: u32) -> Element<'_, Message> {
+        if let Some((_, typed)) = self.renaming.as_ref().filter(|(t, _)| *t == target) {
+            let hint = match target {
+                Rename::Session(_) => "Session name… (empty = Claude's title)",
+                Rename::Tab(_) => "Terminal name… (empty = default name)",
+            };
             return row![
-                text_input("Session name… (empty = Claude's title)", typed)
+                text_input(hint, typed)
                     .id(iced::widget::Id::new(RENAME_INPUT))
                     .on_input(Message::RenameInput)
                     .on_submit(Message::RenameSave)
@@ -177,7 +188,7 @@ impl App {
         }
         row![
             text(title).size(size),
-            button(text("Rename").size(button_size)).padding([2, 8]).on_press(Message::RenameStart(sid.to_string())).style(button::secondary),
+            button(text("Rename").size(button_size)).padding([2, 8]).on_press(Message::RenameStart(target)).style(button::secondary),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)

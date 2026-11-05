@@ -33,10 +33,31 @@ pub struct AppState {
     /// Extra Claude accounts. The default account (`~/.claude`) is not listed.
     #[serde(default)]
     pub accounts: Vec<Account>,
-    /// Pinned session IDs, in the order they were pinned. Shown in the
-    /// PINNED block at the top of the sidebar.
+    /// Pinned sessions and terminals, in the order they were pinned. Shown
+    /// in the PINNED block at the top of the sidebar.
     #[serde(default)]
-    pub pinned: Vec<String>,
+    pub pinned: Vec<Pin>,
+}
+
+/// One entry of the PINNED block. A session is saved as its plain ID (the
+/// only kind older versions wrote), a terminal as an object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Pin {
+    Session(String),
+    Terminal(PinnedTerminal),
+}
+
+/// A pinned plain terminal. It stays pinned after its tab closes; opening
+/// it starts a new shell in the same folder, with the same name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinnedTerminal {
+    /// Unique among pinned terminals.
+    pub id: u64,
+    /// The name the user gave it. None shows the default "Terminal · folder".
+    #[serde(default)]
+    pub name: Option<String>,
+    pub cwd: std::path::PathBuf,
 }
 
 /// A Claude account: its own Claude Code config folder (`CLAUDE_CONFIG_DIR`),
@@ -97,7 +118,7 @@ mod tests {
             workspaces: vec![Workspace { id: 1, name: "Work".into(), sessions: vec!["a".into()], collapsed: true }],
             default_collapsed: true, session_names: BTreeMap::from([("a".into(), "My name".into())]),
             accounts: vec![Account { id: 1, name: "Pro".into(), config_dir: "/home/me/.claude-pro".into() }],
-            pinned: vec!["b".into()] };
+            pinned: vec![Pin::Session("b".into()), Pin::Terminal(PinnedTerminal { id: 1, name: Some("Logs".into()), cwd: "/tmp".into() })] };
         s.save(&p).unwrap();
         let loaded = AppState::load(&p);
         assert_eq!(loaded.open_sessions, s.open_sessions);
@@ -110,6 +131,15 @@ mod tests {
         assert_eq!(loaded.pinned, s.pinned);
         assert_eq!(loaded.version, STATE_VERSION);
         assert!(!p.with_extension("tmp").exists());
+    }
+
+    /// Files from before terminals could be pinned list only session IDs.
+    #[test]
+    fn old_pins_load_as_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state.json");
+        fs::write(&p, r#"{"version":1,"pinned":["a","b"]}"#).unwrap();
+        assert_eq!(AppState::load(&p).pinned, [Pin::Session("a".into()), Pin::Session("b".into())]);
     }
 
     #[test]

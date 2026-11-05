@@ -3,6 +3,7 @@
 use super::*;
 use super::accounts::account_badge;
 use super::ellipsis::ellipsis;
+use codemux_core::textmatch;
 use super::workspaces::{delete_workspace_confirm, workspace_header};
 use iced::widget::{column, stack};
 
@@ -29,12 +30,16 @@ pub(super) struct TabRow {
     folder: String,
     status: &'static str,
     selected: bool,
+    /// While searching: why the tab matched, when its name does not show it.
+    why: Option<String>,
+    /// The pinned terminal this tab runs, if any.
+    terminal_pin: Option<u64>,
 }
 
-fn tab_row(t: &TabRow) -> Element<'static, Message> {
+fn tab_row(t: &TabRow, query: &str) -> Element<'static, Message> {
     let mut label = row![
         text("●").size(12).color(status_color(t.status)),
-        row_label(t.title.clone(), true),
+        row_label(t.title.clone(), true, query),
         account_badge(&t.account),
     ]
     .spacing(8)
@@ -43,7 +48,7 @@ fn tab_row(t: &TabRow) -> Element<'static, Message> {
         label = label.push(workspace_tag(&t.workspace_name));
     }
     let selected = t.selected;
-    let tab = button(label).on_press(Message::SelectTab(t.id)).width(Length::Fill).style(move |theme, status| open_tab_style(theme, status, selected));
+    let tab = button(with_why(label.into(), t.why.clone(), query)).on_press(Message::SelectTab(t.id)).width(Length::Fill).style(move |theme, status| open_tab_style(theme, status, selected));
     // The accent shows through the left padding as a thin bar on the selected tab.
     let tab = container(tab).padding(iced::Padding { left: 3.0, ..iced::Padding::ZERO }).style(move |_: &iced::Theme| container::Style {
         background: selected.then(|| ACCENT.into()),
@@ -91,9 +96,19 @@ fn open_tab_style(theme: &iced::Theme, status: button::Status, selected: bool) -
 
 /// Sidebar label: only the session name, bold for a session open in a tab.
 /// Details (folder, branch, time) show in the main area when selected.
-/// Always one line: a long name ends in "…".
-fn row_label(title: String, bold: bool) -> Element<'static, Message> {
-    ellipsis(title).size(TEXT_SIZE).font(if bold { BOLD } else { iced::Font::DEFAULT }).into()
+/// Always one line: a long name ends in "…". The search text is marked.
+fn row_label(title: String, bold: bool, query: &str) -> Element<'static, Message> {
+    ellipsis(title).size(TEXT_SIZE).font(if bold { BOLD } else { iced::Font::DEFAULT }).mark(query).into()
+}
+
+/// A row's label, with a second small gray line under it while searching
+/// that shows why the row matched (the matching part of the conversation,
+/// or the folder or branch), with the search text marked.
+fn with_why(label: Element<'static, Message>, why: Option<String>, query: &str) -> Element<'static, Message> {
+    match why {
+        Some(why) => column![label, ellipsis(why).size(SMALL_TEXT_SIZE).color(MUTED).mark(query)].spacing(2).into(),
+        None => label,
+    }
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
@@ -181,6 +196,8 @@ impl App {
                     folder,
                     status,
                     selected: self.selected == Selected::Tab(tab.id),
+                    why: self.tab_why(tab),
+                    terminal_pin: tab.terminal_pin,
                 }
             })
             .collect();
@@ -300,13 +317,13 @@ impl App {
     /// none matches the search.
     fn open_list(&self, tabs: &[TabRow]) -> Option<Element<'static, Message>> {
         let q = self.search.to_lowercase();
-        let rows: Vec<&TabRow> = tabs.iter().filter(|t| !self.is_pinned_tab(t.session.as_deref()) && self.tab_matches(t, &q)).collect();
+        let rows: Vec<&TabRow> = tabs.iter().filter(|t| !self.is_pinned(t.session.as_deref(), t.terminal_pin) && self.tab_matches(t, &q)).collect();
         if rows.is_empty() {
             return None;
         }
         let mut list = column![section("OPEN")].spacing(2).width(Length::Fill);
         for t in rows {
-            list = list.push(tab_row(t));
+            list = list.push(tab_row(t, &q));
         }
         // Many tabs must not push the tree off screen: past this height the
         // block scrolls on its own.
@@ -322,13 +339,27 @@ impl App {
     fn pinned_list(&self, tabs: &[TabRow]) -> Option<Element<'static, Message>> {
         let q = self.search.to_lowercase();
         let mut rows = Vec::new();
-        for sid in &self.pinned {
-            if let Some(t) = tabs.iter().find(|t| t.session.as_deref() == Some(sid.as_str())) {
-                if self.tab_matches(t, &q) {
-                    rows.push(tab_row(t));
+        for pin in &self.pinned {
+            let open = tabs.iter().find(|t| match pin {
+                Pin::Session(sid) => t.session.as_deref() == Some(sid.as_str()),
+                Pin::Terminal(p) => t.terminal_pin == Some(p.id),
+            });
+            match (open, pin) {
+                (Some(t), _) => {
+                    if self.tab_matches(t, &q) {
+                        rows.push(tab_row(t, &q));
+                    }
                 }
-            } else if let Some(m) = self.index.listed(sid).filter(|m| self.session_matches(m, &q)) {
-                rows.push(self.session_row(m));
+                (None, Pin::Session(sid)) => {
+                    if let Some(m) = self.index.listed(sid).filter(|m| self.session_matches(m, &q)) {
+                        rows.push(self.session_row(m));
+                    }
+                }
+                (None, Pin::Terminal(p)) => {
+                    if let Some(row) = self.pinned_terminal_row(p, &q) {
+                        rows.push(row);
+                    }
+                }
             }
         }
         if rows.is_empty() {
@@ -343,6 +374,26 @@ impl App {
         Some(container(list).max_height(PINNED_LIST_MAX_HEIGHT).into())
     }
 
+    /// A pinned terminal whose tab is closed: click to open it, ✕ to unpin.
+    /// None when it does not match the search (by name or folder).
+    fn pinned_terminal_row(&self, p: &PinnedTerminal, q: &str) -> Option<Element<'static, Message>> {
+        let title = p.name.clone().unwrap_or_else(|| terminal_title(&p.cwd));
+        let folder = p.cwd.display().to_string();
+        let title_hit = title.to_lowercase().contains(q);
+        if !q.is_empty() && !title_hit && !folder.to_lowercase().contains(q) {
+            return None;
+        }
+        let why = (!q.is_empty() && !title_hit).then_some(folder);
+        let label = row![row_label(title, false, q)];
+        let open = button(with_why(label.into(), why, q)).on_press(Message::OpenPinnedTerminal(p.id)).width(Length::Fill).style(button::text);
+        let unpin = tooltip(
+            button(text("✕").size(15)).padding([10, 12]).on_press(Message::UnpinTerminal(p.id)).style(close_style),
+            container(text("Unpin").size(12)).padding(6).style(container::rounded_box),
+            tooltip::Position::Left,
+        );
+        Some(row![open, unpin].spacing(4).align_y(iced::Alignment::Center).into())
+    }
+
     /// The search filter for a tab: its session's title, folder, branch and
     /// conversation, or for a plain terminal its title and folder.
     fn tab_matches(&self, t: &TabRow, q: &str) -> bool {
@@ -354,11 +405,41 @@ impl App {
 
     fn session_matches(&self, m: &SessionMeta, q: &str) -> bool {
         q.is_empty()
-            || self.content_hits.contains(&m.id)
+            || self.content_hits.contains_key(&m.id)
             || [Some(self.session_title(m)), Some(m.title()), m.cwd.as_ref().map(|c| c.display().to_string()), m.git_branch.clone(), m.last_prompt.clone()]
                 .into_iter()
                 .flatten()
                 .any(|s| s.to_lowercase().contains(q))
+    }
+
+    /// Why a session matched the search, to show under its name: the part of
+    /// the conversation that has the search text, or else the folder or
+    /// branch that has it. None when not searching, or when the name itself
+    /// has the text, since the marked name already shows it.
+    fn match_why(&self, m: &SessionMeta) -> Option<String> {
+        let q = textmatch::normalize_query(&self.search);
+        if q.is_empty() || !textmatch::match_ranges(&self.session_title(m), &q).is_empty() {
+            return None;
+        }
+        // The conversation search runs in the background; until it is done,
+        // the last prompt (already in memory) can show a match at once.
+        self.content_hits
+            .get(&m.id)
+            .cloned()
+            .or_else(|| m.last_prompt.as_deref().and_then(|p| textmatch::snippet(p, &q)))
+            .or_else(|| m.cwd.as_ref().map(|c| c.display().to_string()).filter(|c| c.to_lowercase().contains(&q)))
+            .or_else(|| m.git_branch.clone().filter(|b| b.to_lowercase().contains(&q)))
+    }
+
+    /// match_why for an open tab. A plain terminal can match by its folder.
+    fn tab_why(&self, tab: &Tab) -> Option<String> {
+        if let Some(m) = tab.session_id.as_deref().and_then(|s| self.index.listed(s)) {
+            return self.match_why(m);
+        }
+        let q = textmatch::normalize_query(&self.search);
+        let (title, _) = self.tab_title(tab);
+        let folder = tab.cwd.display().to_string();
+        (!q.is_empty() && !title.to_lowercase().contains(&q) && folder.to_lowercase().contains(&q)).then_some(folder)
     }
 
     /// The tab's workspace name for its row in the OPEN block. Empty when
@@ -380,7 +461,7 @@ impl App {
         // them out like open ones. They keep their workspace for when they
         // are unpinned.
         let active: HashSet<&str> =
-            tabs.iter().filter_map(|t| t.session.as_deref()).chain(self.pinned.iter().map(String::as_str)).collect();
+            tabs.iter().filter_map(|t| t.session.as_deref()).chain(self.pinned_sessions()).collect();
         let mut list = Column::new().spacing(2).width(Length::Fill);
         let q = self.search.to_lowercase();
         let matches = |m: &SessionMeta| self.session_matches(m, &q);
@@ -469,10 +550,10 @@ impl App {
 
     pub(super) fn session_row(&self, m: &SessionMeta) -> Element<'static, Message> {
         let selected = self.selected == Selected::Session(m.id.clone());
-        let label = row![row_label(self.session_title(m), false), account_badge(&self.account_tag(m.account))]
+        let label = row![row_label(self.session_title(m), false, &self.search), account_badge(&self.account_tag(m.account))]
             .spacing(8)
             .align_y(iced::Alignment::Center);
-        button(label)
+        button(with_why(label.into(), self.match_why(m), &self.search))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
             .style(if selected { button::primary } else { button::text })

@@ -38,18 +38,23 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 - **Pin sessions.** Press **Pin** on a session (or in a tab's header) to keep it in a PINNED block
   at the very top of the sidebar, above the open tabs. It stays there while it is open in a tab, and
   ⌘1–9 counts pinned tabs first. Pins are remembered after a restart.
+  Plain terminal tabs can be pinned too: a pinned terminal stays in PINNED after its tab closes, and a click
+  opens a new shell in the same folder with the same name. Its ✕ unpins it.
 - **Open tabs on top.** Every open tab, from every workspace, is in one OPEN block at the top of the sidebar,
   with its workspace name. It does not scroll away, so you can switch tabs without scrolling.
 - **Sidebar with every session.** Sessions are grouped into Previously open, Today, Yesterday,
   Last 7 days, Last 30 days and Older. Each row shows the title, project folder, branch and last activity time.
 - **Search** by title, folder, branch or anything said in the conversation (your prompts and Claude's replies).
+  Press ⌘⇧F to jump to the search box. The words you typed are marked in yellow. When a session matches by
+  its conversation (or its folder or branch), a small gray line under its name shows the part that matched.
   The ✕ in the box clears it.
 - **Status at a glance:** ● working, ◐ waiting for your input, ▸ plain shell, ○ not running.
 - **Notification when Claude waits.** When Claude finishes or asks you something in a tab you are not
   looking at, or while the window is in the background, you get a system notification.
+  On macOS, the Dock icon shows how many waiting tabs you have not looked at yet.
 - **New session:** pick a folder and Claude starts there right away.
 - **Continue an old session** with one click (`claude --resume` under the hood).
-- **Rename** a session (a local label, only in Codemux).
+- **Rename** a session (a local label, only in Codemux), or a terminal tab from its header.
 - **Delete** a session for good, after you confirm. A running session can't be deleted.
 
 ### Workspaces
@@ -92,6 +97,7 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 | New terminal | ⌘T | Ctrl+Shift+T |
 | Close tab | ⌘W | Ctrl+Shift+W |
 | Hide or show sidebar | ⌘B | Ctrl+Shift+B |
+| Search sessions | ⌘⇧F | Ctrl+Shift+F |
 | Go to session 1–9 | ⌘1–⌘9 | Ctrl+Shift+1–9 |
 
 App shortcuts never take keys that Claude Code needs in the terminal.

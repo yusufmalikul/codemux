@@ -1,15 +1,21 @@
 //! One-line text that ends in "…" when it is wider than its space.
 //! iced 0.14 has no such option, so the text is cut here, at layout time,
 //! with the real font, so the cut always matches what is drawn.
+//! It can also mark the places that match the search text.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::text::{self, Paragraph as _};
 use iced::advanced::widget::{self, tree, Tree, Widget};
+use codemux_core::textmatch;
 use iced::{alignment, mouse, Element, Length, Pixels, Rectangle, Size};
+use std::ops::Range;
+
+/// Background behind text that matches the search.
+const MARK: iced::Color = iced::Color::from_rgba8(0xf0, 0xb4, 0x29, 0.4);
 
 pub(super) fn ellipsis(content: impl Into<String>) -> Ellipsis {
-    Ellipsis { content: content.into(), size: None, font: None, hug: false }
+    Ellipsis { content: content.into(), size: None, font: None, color: None, hug: false, mark: String::new() }
 }
 
 /// Takes all the width it gets (`Length::Fill`), so in a row the other
@@ -18,7 +24,10 @@ pub(super) struct Ellipsis {
     content: String,
     size: Option<Pixels>,
     font: Option<iced::Font>,
+    color: Option<iced::Color>,
     hug: bool,
+    /// Search text (one lowercase line) to mark wherever it shows.
+    mark: String,
 }
 
 impl Ellipsis {
@@ -32,6 +41,17 @@ impl Ellipsis {
         self
     }
 
+    pub(super) fn color(mut self, color: iced::Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Mark every place the search text `query` shows, ignoring case.
+    pub(super) fn mark(mut self, query: &str) -> Self {
+        self.mark = textmatch::normalize_query(query);
+        self
+    }
+
     /// Use only the width of the shown text, so what comes after it in a
     /// row follows right after it instead of at the far end. It still asks
     /// for `Fill`, so a row gives the other items their space first.
@@ -41,13 +61,36 @@ impl Ellipsis {
     }
 }
 
-/// The text as shown (maybe cut), and what it was made from, so it is
-/// cut again only when the text, font or width changes.
+/// What the text was made from, so it is laid out again only when one of
+/// these changes: the text, the width, the size, the font and the mark.
+type MadeFrom = (String, f32, Pixels, iced::Font, String);
+
+/// The text as shown (maybe cut).
 #[derive(Default)]
 struct State<P> {
-    made_from: Option<(String, f32, Pixels, iced::Font)>,
+    made_from: Option<MadeFrom>,
     shown: String,
     paragraph: P,
+    /// Indexes of the paragraph's spans that match the search.
+    marked: Vec<usize>,
+}
+
+/// `shown` cut into pieces in order: each with whether it matches `query`.
+/// Joined, the pieces give back `shown`.
+pub(super) fn pieces(shown: &str, query: &str) -> Vec<(Range<usize>, bool)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for r in textmatch::match_ranges(shown, query) {
+        if r.start > at {
+            out.push((at..r.start, false));
+        }
+        at = r.end;
+        out.push((r, true));
+    }
+    if at < shown.len() || out.is_empty() {
+        out.push((at..shown.len(), false));
+    }
+    out
 }
 
 /// One line of `content`: line breaks and runs of spaces become one space.
@@ -99,24 +142,26 @@ where
         let unchanged = state
             .made_from
             .as_ref()
-            .is_some_and(|(c, m, s, f)| *c == self.content && *m == max && *s == size && *f == font);
+            .is_some_and(|(c, m, s, f, k)| *c == self.content && *m == max && *s == size && *f == font && *k == self.mark);
         if !unchanged {
-            let paragraph = |content: &str| {
-                Renderer::Paragraph::with_text(text::Text {
-                    content,
-                    bounds: Size::INFINITE,
-                    size,
-                    line_height: text::LineHeight::default(),
-                    font,
-                    align_x: text::Alignment::Default,
-                    align_y: alignment::Vertical::Top,
-                    shaping: text::Shaping::default(),
-                    wrapping: text::Wrapping::None,
-                })
+            let base = text::Text {
+                content: "",
+                bounds: Size::INFINITE,
+                size,
+                line_height: text::LineHeight::default(),
+                font,
+                align_x: text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: text::Shaping::default(),
+                wrapping: text::Wrapping::None,
             };
-            state.shown = fit(&self.content, max, |s| paragraph(s).min_width());
-            state.paragraph = paragraph(&state.shown);
-            state.made_from = Some((self.content.clone(), max, size, font));
+            state.shown = fit(&self.content, max, |s| Renderer::Paragraph::with_text(base.with_content(s)).min_width());
+            let pieces = pieces(&state.shown, &self.mark);
+            let spans: Vec<text::Span<'_, (), iced::Font>> =
+                pieces.iter().map(|(r, _)| text::Span::new(&state.shown[r.clone()])).collect();
+            state.paragraph = Renderer::Paragraph::with_spans(base.with_content(spans.as_slice()));
+            state.marked = pieces.iter().enumerate().filter(|(_, (_, m))| *m).map(|(i, _)| i).collect();
+            state.made_from = Some((self.content.clone(), max, size, font, self.mark.clone()));
         }
         let size = limits.resolve(Length::Fill, Length::Shrink, state.paragraph.min_bounds());
         // A row gives a `Fill` item a fixed width (min = max), so hugging
@@ -136,7 +181,15 @@ where
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
-        renderer.fill_paragraph(&state.paragraph, layout.bounds().position(), style.text_color, *viewport);
+        let origin = layout.bounds().position() - iced::Point::ORIGIN;
+        for &i in &state.marked {
+            for bounds in state.paragraph.span_bounds(i) {
+                let quad = renderer::Quad { bounds: bounds + origin, border: iced::border::rounded(3), ..Default::default() };
+                renderer.fill_quad(quad, MARK);
+            }
+        }
+        let color = self.color.unwrap_or(style.text_color);
+        renderer.fill_paragraph(&state.paragraph, layout.bounds().position(), color, *viewport);
     }
 
     fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, _renderer: &Renderer, operation: &mut dyn widget::Operation) {
@@ -156,7 +209,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::fit;
+    use super::{fit, pieces};
+
+    #[test]
+    fn pieces_split_out_every_match() {
+        let shown = "Fix Webhook, webhook…";
+        let got: Vec<(&str, bool)> = pieces(shown, "webhook").into_iter().map(|(r, m)| (&shown[r], m)).collect();
+        assert_eq!(got, [("Fix ", false), ("Webhook", true), (", ", false), ("webhook", true), ("…", false)]);
+        // Nothing to mark: one plain piece, even for empty text.
+        assert_eq!(pieces("Fix", ""), [(0..3, false)]);
+        assert_eq!(pieces("", "x"), [(0..0, false)]);
+    }
 
     /// Every character is 1 wide, so widths are easy to count.
     fn chars(s: &str) -> f32 {

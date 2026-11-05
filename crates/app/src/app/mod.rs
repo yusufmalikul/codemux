@@ -15,7 +15,7 @@ use codemux_core::detect::{self, ClaudeProc, ProcScanner};
 use codemux_core::launch::{self, ClaudeMode, LaunchSpec};
 use codemux_core::paths;
 use codemux_core::sessions::{self, Index, Role, Root, SessionMeta};
-use codemux_core::store::{Account, AppState, Workspace};
+use codemux_core::store::{Account, AppState, Pin, PinnedTerminal, Workspace};
 use codemux_terminal as term;
 use iced::widget::{button, container, lazy, mouse_area, pick_list, row, rule, scrollable, text, text_input, tooltip, Column};
 use iced::{keyboard, time, Element, Length, Subscription, Task};
@@ -121,6 +121,24 @@ struct Tab {
     busy: Option<bool>,
     /// Status at the last check, to notice when Claude starts waiting (notify.rs).
     last_status: Option<&'static str>,
+    /// Claude started waiting while the user was not looking at this tab,
+    /// and they have not looked at it since. Counted on the Dock icon.
+    unseen: bool,
+    /// The pinned terminal (its ID in the PINNED list) this tab runs.
+    /// Its name is kept in the pin, so it outlives the tab.
+    terminal_pin: Option<u64>,
+    /// The name the user gave this terminal while it is not pinned. Lost
+    /// when the tab closes, like the terminal itself.
+    name: Option<String>,
+}
+
+/// What a name box renames.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Rename {
+    /// A session, by ID. The name is saved and shown wherever the session is.
+    Session(String),
+    /// A plain terminal tab, by tab ID.
+    Tab(u64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,9 +174,10 @@ pub(crate) struct App {
     /// Bumped by every refresh done on this thread. A background result that
     /// started from an older index is thrown away.
     index_gen: u64,
-    /// Sessions whose conversation contains the search text. Found on another
-    /// thread (see search_conversations_in_background), when the search changes.
-    content_hits: HashSet<String>,
+    /// Sessions whose conversation contains the search text, each with the
+    /// part of the message that matched. Found on another thread (see
+    /// search_conversations_in_background), when the search changes.
+    content_hits: HashMap<String, String>,
     /// Bumped when `content_hits` changes, so the lazy sidebar knows to rebuild.
     content_hits_version: u64,
     /// Bumped by every search change. An older search's result is thrown away.
@@ -187,6 +206,8 @@ pub(crate) struct App {
     /// Tests record OS notifications here instead of showing them.
     #[cfg(test)]
     notified: Vec<notify::Alert>,
+    /// The number on the Dock icon: tabs with Claude waiting for input.
+    dock_badge: usize,
     /// The window has keyboard focus. A tab on screen in a focused window
     /// needs no notification.
     window_focused: bool,
@@ -225,9 +246,9 @@ pub(crate) struct App {
     /// Names the user gave to sessions, by session ID (saved in state.json).
     session_names: BTreeMap<String, String>,
     /// Session being renamed, and the text typed so far.
-    renaming: Option<(String, String)>,
+    renaming: Option<(Rename, String)>,
     /// Pinned session IDs, in pin order (saved in state.json).
-    pinned: Vec<String>,
+    pinned: Vec<Pin>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,7 +291,9 @@ pub(crate) enum Message {
     /// The clear button of the search box.
     SearchClear,
     /// The result of a conversation search, with its generation.
-    ContentSearched(u64, HashSet<String>),
+    ContentSearched(u64, HashMap<String, String>),
+    /// Go to the sidebar search box (⌘⇧F), showing the sidebar if hidden.
+    FocusSearch,
     SelectIndex(usize),
     ScaleFactor(f32),
     DeleteAsk(String),
@@ -290,13 +313,19 @@ pub(crate) enum Message {
     /// Move a session to a workspace. None is the default workspace.
     MoveSession(String, Option<u64>),
     /// Show the name box for a session.
-    RenameStart(String),
+    RenameStart(Rename),
     RenameInput(String),
     /// Save the typed name. An empty name goes back to Claude's title.
     RenameSave,
     RenameCancel,
     /// Pin a session to the top of the sidebar, or unpin it.
     TogglePin(String),
+    /// Pin a plain terminal tab, or unpin it.
+    TogglePinTab(u64),
+    /// Open a pinned terminal: go to its tab, or start a new shell for it.
+    OpenPinnedTerminal(u64),
+    /// Unpin a terminal by its pin ID (the ✕ of a closed pinned terminal).
+    UnpinTerminal(u64),
     ShowAccounts,
     NewAccountStart,
     NewAccountName(String),
@@ -316,6 +345,16 @@ pub(crate) enum Message {
 /// The work of a background refresh. Some(index) when anything changed.
 fn refresh_job(mut index: Index, roots: &[Root]) -> Option<Index> {
     index.refresh(roots).then_some(index)
+}
+
+/// The user's home folder, where a terminal with no better place opens.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The name of a terminal the user has not named.
+fn terminal_title(cwd: &std::path::Path) -> String {
+    format!("Terminal · {}", folder_label(cwd))
 }
 
 fn folder_label(p: &std::path::Path) -> String {
@@ -360,6 +399,8 @@ fn shortcut(event: iced::Event, _status: iced::event::Status, _window: iced::win
             "t" => Some(Message::NewTerminal),
             "w" => Some(Message::CloseSelected),
             "b" => Some(Message::ToggleHideSidebar),
+            // ⌘⇧F on macOS. Off macOS every app key already has Shift.
+            "f" if modifiers.shift() => Some(Message::FocusSearch),
             d if d.len() == 1 && ('1'..='9').contains(&d.chars().next()?) => {
                 Some(Message::SelectIndex(d.parse::<usize>().ok()? - 1))
             }
@@ -410,7 +451,7 @@ impl App {
             index_version: 0,
             index_refreshing: false,
             index_gen: 0,
-            content_hits: HashSet::new(),
+            content_hits: HashMap::new(),
             content_hits_version: 0,
             content_search_gen: 0,
             content_search_cancel: Arc::default(),
@@ -426,6 +467,7 @@ impl App {
             resumed: Vec::new(),
             #[cfg(test)]
             notified: Vec::new(),
+            dock_badge: 0,
             window_focused: true,
             scanner: ProcScanner::default(),
             state_path,
@@ -572,6 +614,9 @@ impl App {
                     last_output: Instant::now(),
                     busy: None,
                     last_status: None,
+                    unseen: false,
+                    terminal_pin: None,
+                    name: None,
                 });
                 self.selected = Selected::Tab(id);
                 self.adopt_tab_sessions();
@@ -678,6 +723,7 @@ impl App {
         // Every message can change a tab's status (a title, the timer, a
         // focus change), so check after each one.
         self.notify_waiting();
+        self.update_dock_badge();
         task
     }
 
@@ -762,8 +808,7 @@ impl App {
                     Selected::Tab(id) => self.tabs.iter().find(|t| t.id == *id).map(|t| t.cwd.clone()),
                     _ => None,
                 }
-                .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from("."));
+                .unwrap_or_else(home_dir);
                 return self.spawn(TabKind::Shell, launch::shell(cwd), None, 0);
             }
             Message::SelectTab(id) => {
@@ -798,6 +843,15 @@ impl App {
             Message::SearchClear => {
                 let search = self.update(Message::Search(String::new()));
                 return Task::batch([search, iced::widget::operation::focus(iced::widget::Id::new(SEARCH_INPUT))]);
+            }
+            Message::FocusSearch => {
+                if self.hide_sidebar {
+                    self.hide_sidebar = false;
+                    self.save_state();
+                }
+                // Select what is there, so typing starts a new search.
+                let id = iced::widget::Id::new(SEARCH_INPUT);
+                return Task::batch([iced::widget::operation::focus(id.clone()), iced::widget::operation::select_all(id)]);
             }
             Message::ContentSearched(gen, hits) => {
                 if gen == self.content_search_gen {
@@ -875,9 +929,12 @@ impl App {
                 }
                 self.workspaces_changed();
             }
-            Message::RenameStart(sid) => {
-                let current = self.session_names.get(&sid).cloned().unwrap_or_default();
-                self.renaming = Some((sid, current));
+            Message::RenameStart(target) => {
+                let current = match &target {
+                    Rename::Session(sid) => self.session_names.get(sid).cloned(),
+                    Rename::Tab(id) => self.tabs.iter().find(|t| t.id == *id).and_then(|t| self.terminal_name(t)),
+                };
+                self.renaming = Some((target, current.unwrap_or_default()));
                 return iced::widget::operation::focus(iced::widget::Id::new(RENAME_INPUT));
             }
             Message::RenameInput(text) => {
@@ -887,25 +944,39 @@ impl App {
             }
             Message::RenameCancel => self.renaming = None,
             Message::RenameSave => {
-                if let Some((sid, name)) = self.renaming.take() {
-                    let name = name.trim().to_string();
-                    if name.is_empty() {
-                        self.session_names.remove(&sid);
-                    } else {
-                        self.session_names.insert(sid, name);
+                match self.renaming.take() {
+                    Some((Rename::Session(sid), name)) => {
+                        let name = name.trim().to_string();
+                        if name.is_empty() {
+                            self.session_names.remove(&sid);
+                        } else {
+                            self.session_names.insert(sid, name);
+                        }
+                        // Names show in the cached sidebar tree.
+                        self.workspaces_changed();
                     }
-                    // Names show in the cached sidebar tree.
-                    self.workspaces_changed();
+                    Some((Rename::Tab(id), name)) => self.rename_terminal(id, name),
+                    None => {}
                 }
             }
             Message::TogglePin(sid) => {
-                if self.pinned.contains(&sid) {
-                    self.pinned.retain(|s| s != &sid);
+                let pin = Pin::Session(sid);
+                if self.pinned.contains(&pin) {
+                    self.pinned.retain(|p| p != &pin);
                 } else {
-                    self.pinned.push(sid);
+                    self.pinned.push(pin);
                 }
                 // Pinned sessions leave the cached sidebar tree.
                 self.workspaces_changed();
+            }
+            Message::TogglePinTab(id) => self.toggle_pin_tab(id),
+            Message::OpenPinnedTerminal(pin) => return self.open_pinned_terminal(pin),
+            Message::UnpinTerminal(pin) => {
+                self.pinned.retain(|p| !matches!(p, Pin::Terminal(t) if t.id == pin));
+                for tab in self.tabs.iter_mut().filter(|t| t.terminal_pin == Some(pin)) {
+                    tab.terminal_pin = None;
+                }
+                self.save_state();
             }
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
@@ -961,7 +1032,7 @@ impl App {
                     w.sessions.retain(|s| s != sid);
                 }
                 self.session_names.remove(sid);
-                self.pinned.retain(|s| s != sid);
+                self.pinned.retain(|p| !matches!(p, Pin::Session(s) if s == sid));
                 self.workspaces_version += 1;
                 if self.selected == Selected::Session(sid.to_string()) {
                     self.selected = Selected::None;
@@ -1027,14 +1098,118 @@ impl App {
     /// Tab IDs in the order the sidebar shows them, which is the ⌘1–9
     /// order: pinned tabs first (in pin order), then the rest in tab order.
     fn tab_order(&self) -> Vec<u64> {
-        let pinned = self.pinned.iter().filter_map(|sid| self.tabs.iter().find(|t| t.session_id.as_ref() == Some(sid)));
-        let rest = self.tabs.iter().filter(|t| !self.is_pinned_tab(t.session_id.as_deref()));
+        let pinned = self.pinned.iter().filter_map(|pin| self.tab_for_pin(pin));
+        let rest = self.tabs.iter().filter(|t| !self.is_pinned_tab(t));
         pinned.chain(rest).map(|t| t.id).collect()
     }
 
     /// The tab's session is pinned, so the tab shows in PINNED, not OPEN.
-    fn is_pinned_tab(&self, session: Option<&str>) -> bool {
-        session.is_some_and(|sid| self.pinned.iter().any(|p| p == sid))
+    fn is_pinned_tab(&self, tab: &Tab) -> bool {
+        self.is_pinned(tab.session_id.as_deref(), tab.terminal_pin)
+    }
+
+    /// A tab with this session and pinned terminal shows in PINNED.
+    fn is_pinned(&self, session: Option<&str>, terminal_pin: Option<u64>) -> bool {
+        terminal_pin.is_some() || session.is_some_and(|sid| self.is_session_pinned(sid))
+    }
+
+    fn is_session_pinned(&self, sid: &str) -> bool {
+        self.pinned_sessions().any(|s| s == sid)
+    }
+
+    /// The pinned session IDs, in pin order.
+    fn pinned_sessions(&self) -> impl Iterator<Item = &str> {
+        self.pinned.iter().filter_map(|p| match p {
+            Pin::Session(sid) => Some(sid.as_str()),
+            Pin::Terminal(_) => None,
+        })
+    }
+
+    fn pinned_terminal(&self, id: u64) -> Option<&PinnedTerminal> {
+        self.pinned.iter().find_map(|p| match p {
+            Pin::Terminal(t) if t.id == id => Some(t),
+            _ => None,
+        })
+    }
+
+    /// The open tab a pin shows as, if any.
+    fn tab_for_pin(&self, pin: &Pin) -> Option<&Tab> {
+        match pin {
+            Pin::Session(sid) => self.tabs.iter().find(|t| t.session_id.as_ref() == Some(sid)),
+            Pin::Terminal(p) => self.tabs.iter().find(|t| t.terminal_pin == Some(p.id)),
+        }
+    }
+
+    /// Pin and Rename act on the terminal itself while the tab has no
+    /// session, and once the user pinned or named it as a terminal (so
+    /// running Claude in it later does not change what it is). Otherwise
+    /// they act on the tab's session.
+    fn is_terminal_tab(&self, tab: &Tab) -> bool {
+        tab.session_id.is_none() || tab.terminal_pin.is_some() || tab.name.is_some()
+    }
+
+    /// The name the user gave a terminal tab: kept in its pin when pinned.
+    fn terminal_name(&self, tab: &Tab) -> Option<String> {
+        match tab.terminal_pin {
+            Some(pin) => self.pinned_terminal(pin).and_then(|p| p.name.clone()),
+            None => tab.name.clone(),
+        }
+    }
+
+    /// Give a terminal tab a name. An empty name goes back to the default.
+    fn rename_terminal(&mut self, id: u64, name: String) {
+        let name = Some(name.trim().to_string()).filter(|n| !n.is_empty());
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return };
+        match tab.terminal_pin {
+            Some(pin) => {
+                for p in &mut self.pinned {
+                    if let Pin::Terminal(t) = p {
+                        if t.id == pin {
+                            t.name = name.clone();
+                        }
+                    }
+                }
+                self.save_state();
+            }
+            None => tab.name = name,
+        }
+    }
+
+    /// Pin a terminal tab (its name moves into the pin), or unpin it (the
+    /// name stays with the tab while it is open).
+    fn toggle_pin_tab(&mut self, id: u64) {
+        let Some(pos) = self.tabs.iter().position(|t| t.id == id) else { return };
+        if let Some(pin) = self.tabs[pos].terminal_pin.take() {
+            self.tabs[pos].name = self.pinned_terminal(pin).and_then(|p| p.name.clone());
+            self.pinned.retain(|p| !matches!(p, Pin::Terminal(t) if t.id == pin));
+        } else {
+            let pin = self.pinned.iter().filter_map(|p| match p {
+                Pin::Terminal(t) => Some(t.id),
+                Pin::Session(_) => None,
+            });
+            let pin = pin.max().map_or(1, |m| m + 1);
+            let tab = &mut self.tabs[pos];
+            self.pinned.push(Pin::Terminal(PinnedTerminal { id: pin, name: tab.name.take(), cwd: tab.cwd.clone() }));
+            tab.terminal_pin = Some(pin);
+        }
+        self.save_state();
+    }
+
+    /// Go to a pinned terminal's tab, or start a new shell for it in its
+    /// folder (the home folder if that folder is gone).
+    fn open_pinned_terminal(&mut self, pin: u64) -> Task<Message> {
+        if let Some(id) = self.tabs.iter().find(|t| t.terminal_pin == Some(pin)).map(|t| t.id) {
+            self.selected = Selected::Tab(id);
+            return self.focus_tab(id);
+        }
+        let Some(cwd) = self.pinned_terminal(pin).map(|p| p.cwd.clone()) else { return Task::none() };
+        let cwd = if cwd.is_dir() { cwd } else { home_dir() };
+        let id = self.next_id;
+        let task = self.spawn(TabKind::Shell, launch::shell(cwd), None, 0);
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+            tab.terminal_pin = Some(pin);
+        }
+        task
     }
 
     fn close_tab(&mut self, id: u64) -> Task<Message> {
@@ -1095,6 +1270,9 @@ impl App {
 
     fn tab_title(&self, tab: &Tab) -> (String, String) {
         let folder = folder_label(&tab.cwd);
+        if let Some(name) = self.terminal_name(tab) {
+            return (name, folder);
+        }
         if let Some(name) = tab.session_id.as_ref().and_then(|s| self.session_names.get(s)) {
             return (name.clone(), folder);
         }
@@ -1103,7 +1281,7 @@ impl App {
                 (m.title(), folder)
             }
             _ if tab.kind == TabKind::Claude || tab.claude.is_some() => (format!("claude · {folder}"), folder),
-            _ => (format!("Terminal · {folder}"), folder),
+            _ => (terminal_title(&tab.cwd), folder),
         }
     }
 

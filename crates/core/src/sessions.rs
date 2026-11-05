@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -223,11 +223,12 @@ pub fn parse_file(path: &Path) -> Option<SessionMeta> {
     Some(meta)
 }
 
-/// True if a typed prompt or Claude reply in the file contains `query`,
-/// which must be lowercase. Thinking and tool calls are left out, as in the
-/// detail view. Reads the file line by line, so a big one uses little memory.
-pub fn conversation_contains(path: &Path, query: &str, cancel: &AtomicBool) -> bool {
-    let Ok(file) = fs::File::open(path) else { return false };
+/// A short piece of the first typed prompt or Claude reply in the file that
+/// contains `query` (lowercase), around the match. None if no message has
+/// it. Thinking and tool calls are left out, as in the detail view. Reads
+/// the file line by line, so a big one uses little memory.
+pub fn conversation_snippet(path: &Path, query: &str, cancel: &AtomicBool) -> Option<String> {
+    let Ok(file) = fs::File::open(path) else { return None };
     let mut reader = std::io::BufReader::new(file);
     // These characters are written as they are in JSON, so a line without
     // the query can be skipped without the slow parse.
@@ -236,31 +237,32 @@ pub fn conversation_contains(path: &Path, query: &str, cancel: &AtomicBool) -> b
     loop {
         line.clear();
         if cancel.load(Ordering::Relaxed) || !matches!(reader.read_until(b'\n', &mut line), Ok(1..)) {
-            return false;
+            return None;
         }
         let text = String::from_utf8_lossy(&line);
         if literal && !text.to_lowercase().contains(query) {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        if line_message(&v).is_some_and(|(_, t)| t.to_lowercase().contains(query)) {
-            return true;
+        if let Some(piece) = line_message(&v).and_then(|(_, t)| crate::textmatch::snippet(&t, query)) {
+            return Some(piece);
         }
     }
 }
 
-/// The IDs of the sessions whose conversation contains `query` (lowercase).
+/// The sessions whose conversation contains `query` (lowercase), each with
+/// a short piece of the message that has it (see conversation_snippet).
 /// `files` are (session ID, file) pairs. Setting `cancel` stops the search early.
-pub fn search_conversations(files: &[(String, PathBuf)], query: &str, cancel: &AtomicBool) -> HashSet<String> {
+pub fn search_conversations(files: &[(String, PathBuf)], query: &str, cancel: &AtomicBool) -> HashMap<String, String> {
     let next = AtomicUsize::new(0);
-    let hits = Mutex::new(HashSet::new());
+    let hits = Mutex::new(HashMap::new());
     let threads = std::thread::available_parallelism().map_or(1, usize::from).min(SEARCH_THREADS);
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
                 while let Some((id, path)) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    if conversation_contains(path, query, cancel) {
-                        hits.lock().unwrap().insert(id.clone());
+                    if let Some(piece) = conversation_snippet(path, query, cancel) {
+                        hits.lock().unwrap().insert(id.clone(), piece);
                     }
                 }
             });
@@ -489,7 +491,7 @@ mod tests {
     fn conversation_search_finds_prompts_and_replies_only() {
         let (_dir, path) = search_file(CONVERSATION);
         let cancel = AtomicBool::new(false);
-        let has = |q: &str| conversation_contains(&path, q, &cancel);
+        let has = |q: &str| conversation_snippet(&path, q, &cancel).is_some();
         // Prompts and replies, in any case (the query comes in lowercase).
         assert!(has("fix the"));
         assert!(has("done with the zebra"));
@@ -508,7 +510,8 @@ mod tests {
         let (_b, other) = search_file(&[r#"{"type":"user","message":{"content":"nothing here"}}"#]);
         let files = vec![("zebra".to_string(), zebra), ("other".to_string(), other), ("gone".to_string(), PathBuf::from("/no/such/file"))];
         let hits = search_conversations(&files, "zebra", &AtomicBool::new(false));
-        assert_eq!(hits, HashSet::from(["zebra".to_string()]));
+        // Each hit comes with the part of the message that matched.
+        assert_eq!(hits, HashMap::from([("zebra".to_string(), "Done with the Zebra".to_string())]));
         assert!(search_conversations(&files, "zebra", &AtomicBool::new(true)).is_empty(), "a cancelled search found something");
     }
 

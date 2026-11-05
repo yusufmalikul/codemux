@@ -428,7 +428,7 @@ fn rename_session_shows_new_name_and_is_remembered() {
     let before = std::fs::read(&file).unwrap();
     let msgs = vec![
         Message::SelectSession("s1".into()),
-        Message::RenameStart("s1".into()),
+        Message::RenameStart(Rename::Session("s1".into())),
         Message::RenameInput("  Webhook work ".into()),
         Message::RenameSave,
     ];
@@ -446,7 +446,7 @@ fn rename_session_shows_new_name_and_is_remembered() {
     again.tabs[0].session_id = Some("s1".into());
     assert_eq!(again.tab_title(&again.tabs[0]).0, "Webhook work");
 
-    let msgs = vec![Message::RenameStart("s1".into()), Message::RenameInput("   ".into()), Message::RenameSave];
+    let msgs = vec![Message::RenameStart(Rename::Session("s1".into())), Message::RenameInput("   ".into()), Message::RenameSave];
     assert!(found_after_frames(&mut again, msgs, "Fix webhook retry"), "empty name did not reset");
     assert!(again.session_names.is_empty());
 }
@@ -851,7 +851,7 @@ fn closing_an_idle_tab_needs_no_question() {
 #[test]
 fn escape_cancels_inline_inputs() {
     let (_dir, mut app) = fixture();
-    let _ = app.update(Message::RenameStart("s1".into()));
+    let _ = app.update(Message::RenameStart(Rename::Session("s1".into())));
     let _ = app.update(Message::NewWorkspaceStart);
     let _ = app.update(Message::ToggleAddMenu);
     let _ = app.update(Message::DeleteAsk("s1".into()));
@@ -978,8 +978,8 @@ fn old_conversation_search_results_are_thrown_away() {
     let (_dir, mut app) = fixture();
     let old = app.content_search_gen;
     let _ = app.update(Message::Search("webhook".into()));
-    let _ = app.update(Message::ContentSearched(old, HashSet::from(["stale".to_string()])));
-    assert!(!app.content_hits.contains("stale"));
+    let _ = app.update(Message::ContentSearched(old, HashMap::from([("stale".to_string(), "old".to_string())])));
+    assert!(!app.content_hits.contains_key("stale"));
 }
 
 /// The ✕ in the search box empties it. It shows only when there is text,
@@ -1097,4 +1097,231 @@ fn deleting_a_pinned_session_drops_its_pin() {
     let _ = app.update(Message::DeleteConfirm("s1".into()));
     assert!(app.pinned.is_empty());
     assert!(reopen(dir.path()).pinned.is_empty());
+}
+
+/// A key press as iced reports it, with these modifiers.
+fn key_press(c: &str, modifiers: keyboard::Modifiers) -> iced::Event {
+    let key = keyboard::Key::Character(c.into());
+    iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    })
+}
+
+/// ⌘⇧F (Ctrl+Shift+F off macOS) goes to the sidebar search, and shows the
+/// sidebar first when it is hidden.
+#[test]
+fn shift_cmd_f_goes_to_the_search_box() {
+    let app_keys = if cfg!(target_os = "macos") { keyboard::Modifiers::LOGO } else { keyboard::Modifiers::CTRL };
+    let window = iced::window::Id::unique();
+    let status = iced::event::Status::Ignored;
+    let msg = shortcut(key_press("F", app_keys | keyboard::Modifiers::SHIFT), status, window);
+    assert!(matches!(msg, Some(Message::FocusSearch)), "{msg:?}");
+    // Without Shift the key is left alone.
+    if cfg!(target_os = "macos") {
+        assert!(shortcut(key_press("f", app_keys), status, window).is_none());
+    }
+
+    let (_dir, mut app) = fixture();
+    let placeholder = app.search_placeholder();
+    let _ = app.update(Message::ToggleHideSidebar);
+    assert!(!found_after_frames(&mut app, vec![], &placeholder), "search shown with the sidebar hidden");
+    let _ = app.update(Message::FocusSearch);
+    assert!(!app.hide_sidebar, "the sidebar stays hidden");
+    assert!(found_after_frames(&mut app, vec![], &placeholder), "search box not on screen");
+}
+
+/// A session found by words in its conversation shows the part of the
+/// conversation that matched under its name. One found by its name does not.
+#[test]
+fn search_shows_the_matching_part_of_a_conversation() {
+    let (dir, _) = fixture();
+    let cwd = dir.path().join("work");
+    let cwd = cwd.display();
+    let now = Utc::now().to_rfc3339();
+    let lines = [
+        format!("{{\"type\":\"user\",\"sessionId\":\"s2\",\"cwd\":\"{cwd}\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"tell me about Zebra\\nstripes\"}}}}"),
+        "{\"type\":\"ai-title\",\"aiTitle\":\"Animal talk\",\"sessionId\":\"s2\"}".to_string(),
+    ];
+    std::fs::write(dir.path().join("projects").join("-tmp-proj").join("s2.jsonl"), lines.join("\n") + "\n").unwrap();
+    let mut app = reopen(dir.path());
+
+    let texts = texts_after_frames(&mut app, vec![Message::Search("zebra".into())]);
+    let name = texts.iter().find(|(t, _)| t == "Animal talk").expect("session not found");
+    let piece = texts.iter().find(|(t, _)| t == "tell me about Zebra stripes").expect("no matching part shown");
+    assert!(piece.1.y > name.1.y, "the matching part is not under the name");
+
+    // Found by its name: the name already shows why.
+    let texts = texts_after_frames(&mut app, vec![Message::Search("webhook".into())]);
+    assert!(texts.iter().any(|(t, _)| t == "Fix webhook retry"));
+    assert!(!texts.iter().any(|(t, _)| t == "hello"), "a matching part is shown for a name match");
+}
+
+/// The Dock shows how many tabs have Claude waiting for input that the
+/// user has not looked at since it started waiting. The tab on screen in
+/// a focused window, working tabs and plain shells are not counted.
+#[test]
+fn dock_badge_counts_waiting_tabs_not_yet_seen() {
+    let (_dir, mut app) = fixture();
+    for _ in 0..3 {
+        let _ = app.update(Message::NewTerminal);
+    }
+    assert_eq!(app.dock_badge, 0, "plain shells counted");
+    let title = |id: u64, t: &str| {
+        Message::Terminal(term::Event::BackendCall(id, term::BackendCommand::ProcessAlacrittyEvent(term::AlacrittyEvent::Title(t.into()))))
+    };
+    let (a, b) = (app.tabs[0].id, app.tabs[1].id);
+    app.tabs[0].kind = TabKind::Claude;
+    app.tabs[1].kind = TabKind::Claude;
+
+    // Waiting while the user looks at that tab: nothing to call them back for.
+    let _ = app.update(Message::SelectTab(a));
+    let _ = app.update(title(a, "◐ Fix webhook"));
+    let _ = app.update(title(a, "✳ Fix webhook"));
+    assert_eq!(app.dock_badge, 0, "the tab on screen counted");
+
+    // Both finish while the user looks elsewhere.
+    let _ = app.update(Message::SelectSession("s1".into()));
+    for id in [a, b] {
+        let _ = app.update(title(id, "◐ Work"));
+        let _ = app.update(title(id, "✳ Work"));
+    }
+    assert_eq!(app.dock_badge, 2);
+
+    // Looking at a tab clears it, also after looking away again.
+    let _ = app.update(Message::SelectTab(a));
+    let _ = app.update(Message::SelectSession("s1".into()));
+    assert_eq!(app.dock_badge, 1, "a seen tab still counted");
+    // A tab on screen in a window in the background is not seen yet.
+    let _ = app.update(Message::WindowFocused(false));
+    let _ = app.update(Message::SelectTab(b));
+    assert_eq!(app.dock_badge, 1, "counted as seen while the window was in the background");
+    let _ = app.update(Message::WindowFocused(true));
+    assert_eq!(app.dock_badge, 0, "not cleared when the window came back");
+
+    // Working again, then waiting unseen; closing the tab drops it.
+    let _ = app.update(Message::SelectSession("s1".into()));
+    let _ = app.update(title(b, "◐ Work"));
+    assert_eq!(app.dock_badge, 0);
+    let _ = app.update(title(b, "✳ Work"));
+    assert_eq!(app.dock_badge, 1);
+    let _ = app.update(Message::CloseTab(b));
+    assert_eq!(app.dock_badge, 0, "a closed tab still counted");
+}
+
+/// The ID of the pinned terminal at this place of the PINNED list.
+fn terminal_pin(app: &App, at: usize) -> u64 {
+    match &app.pinned[at] {
+        Pin::Terminal(p) => p.id,
+        other => panic!("not a terminal pin: {other:?}"),
+    }
+}
+
+/// A plain terminal tab can be pinned from its header. It moves to PINNED,
+/// stays there after its tab closes and after restart, and opening it
+/// starts a new shell in the same folder. Unpinning, from the tab or with
+/// the ✕ of a closed one, removes it for good.
+#[test]
+fn terminal_tabs_can_be_pinned_and_come_back_after_restart() {
+    let (dir, mut app) = fixture();
+    let y_of = |texts: &[(String, iced::Rectangle)], t: &str| texts.iter().find(|(s, _)| s == t).map(|(_, b)| b.y);
+    let count = |texts: &[(String, iced::Rectangle)], t: &str| texts.iter().filter(|(s, _)| s == t).count();
+    let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
+    let cwd = app.tabs[0].cwd.clone();
+    let (title, _) = app.tab_title(&app.tabs[0]);
+    assert!(found_after_frames(&mut app, vec![], "Pin"), "no Pin button for a terminal tab");
+
+    let texts = texts_after_frames(&mut app, vec![Message::TogglePinTab(id)]);
+    let pinned = y_of(&texts, "PINNED").expect("no PINNED block");
+    assert!(y_of(&texts, &title).is_some_and(|y| y > pinned), "pinned terminal not under PINNED");
+    assert!(y_of(&texts, "OPEN").is_none(), "pinned terminal still in OPEN");
+    assert!(found_after_frames(&mut app, vec![], "Unpin"), "no Unpin button");
+
+    // Closed: still pinned, shown once.
+    let texts = texts_after_frames(&mut app, vec![Message::CloseTabConfirm(id)]);
+    assert!(y_of(&texts, "PINNED").is_some(), "pin gone after the tab closed");
+    assert_eq!(count(&texts, &title), 1, "closed pinned terminal not shown once");
+
+    // Remembered after restart, and opens a shell in the same folder.
+    let mut again = reopen(dir.path());
+    let pin = terminal_pin(&again, 0);
+    let texts = texts_after_frames(&mut again, vec![]);
+    assert!(y_of(&texts, "PINNED") < y_of(&texts, &title), "pin not remembered");
+    let _ = again.update(Message::OpenPinnedTerminal(pin));
+    assert_eq!(again.tabs.len(), 1, "no tab opened");
+    assert_eq!(again.tabs[0].cwd, cwd, "opened in another folder");
+    assert_eq!(again.selected, Selected::Tab(again.tabs[0].id), "opened tab not selected");
+    // Opening it again goes to the open tab instead of a second one.
+    let _ = again.update(Message::OpenPinnedTerminal(pin));
+    assert_eq!(again.tabs.len(), 1, "a second tab opened");
+    // Not selected, so its title is not also in the tab header.
+    again.selected = Selected::None;
+    let texts = texts_after_frames(&mut again, vec![]);
+    assert!(y_of(&texts, "OPEN").is_none(), "opened pinned terminal shown in OPEN");
+    assert_eq!(count(&texts, &title), 1, "opened pinned terminal shown twice");
+
+    // Pinned tabs come first for ⌘1–9.
+    let _ = again.update(Message::NewTerminal);
+    let _ = again.update(Message::SelectIndex(0));
+    assert_eq!(again.selected, Selected::Tab(again.tabs[0].id), "first shortcut is not the pinned terminal");
+
+    // Unpin from the tab: back in OPEN.
+    let first = again.tabs[0].id;
+    let texts = texts_after_frames(&mut again, vec![Message::TogglePinTab(first)]);
+    assert!(y_of(&texts, "PINNED").is_none(), "PINNED left after unpin");
+    assert!(reopen(dir.path()).pinned.is_empty(), "unpin not saved");
+
+    // The ✕ of a closed pinned terminal unpins it.
+    let _ = again.update(Message::TogglePinTab(first));
+    let _ = again.update(Message::CloseTabConfirm(first));
+    let pin = terminal_pin(&again, 0);
+    let texts = texts_after_frames(&mut again, vec![Message::UnpinTerminal(pin)]);
+    assert!(y_of(&texts, "PINNED").is_none(), "closed pinned terminal not unpinned");
+    assert!(reopen(dir.path()).pinned.is_empty(), "unpin not saved");
+}
+
+/// A plain terminal tab can be renamed from its header. The name shows in
+/// the sidebar and stays when Claude runs in it. A pinned terminal keeps
+/// its name after restart. An empty name goes back to the default.
+#[test]
+fn terminal_tabs_can_be_renamed() {
+    let (dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
+    let (default, _) = app.tab_title(&app.tabs[0]);
+    assert!(found_after_frames(&mut app, vec![], "Rename"), "no Rename button for a terminal tab");
+    let msgs = vec![Message::RenameStart(Rename::Tab(id)), Message::RenameInput("  Logs ".into()), Message::RenameSave];
+    assert!(name_after_frames(&mut app, msgs, "Logs"), "new name not shown");
+    assert!(!name_after_frames(&mut app, vec![], &default), "default name still shown");
+    assert!(found_after_frames(&mut app, vec![Message::Search("logs".into())], "Logs"), "not found by search");
+    let _ = app.update(Message::Search(String::new()));
+
+    // Claude started in the terminal does not take its name.
+    app.tabs[0].session_id = Some("s1".into());
+    assert_eq!(app.tab_title(&app.tabs[0]).0, "Logs");
+    app.tabs[0].session_id = None;
+
+    // Pinned: the name is remembered.
+    let _ = app.update(Message::TogglePinTab(id));
+    let mut again = reopen(dir.path());
+    assert!(name_after_frames(&mut again, vec![], "Logs"), "pinned name not remembered");
+    let _ = again.update(Message::OpenPinnedTerminal(terminal_pin(&again, 0)));
+    let tab = again.tabs[0].id;
+    assert_eq!(again.tab_title(&again.tabs[0]).0, "Logs", "opened pinned terminal lost its name");
+    for m in [Message::RenameStart(Rename::Tab(tab)), Message::RenameInput("Build".into()), Message::RenameSave] {
+        let _ = again.update(m);
+    }
+    assert!(name_after_frames(&mut reopen(dir.path()), vec![], "Build"), "new name of a pinned terminal not saved");
+
+    // An empty name goes back to the default.
+    for m in [Message::RenameStart(Rename::Tab(tab)), Message::RenameInput("  ".into()), Message::RenameSave] {
+        let _ = again.update(m);
+    }
+    assert_eq!(again.tab_title(&again.tabs[0]).0, default, "empty name did not reset");
 }
