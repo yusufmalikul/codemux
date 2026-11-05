@@ -39,6 +39,15 @@ const CLOSE_SHELL: &str = "A shell Claude started is still running. Close anyway
 
 const HISTORY_LIMIT: usize = 300;
 
+/// Soft gray for small text that only adds detail.
+const MUTED: iced::Color = iced::Color::from_rgb8(0x80, 0x80, 0x88);
+
+/// How an app shortcut is written: ⌘ on macOS, Ctrl+Shift elsewhere
+/// (so plain Ctrl keys still reach the terminal).
+fn key_label(key: &str) -> String {
+    if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+Shift+{key}") }
+}
+
 const SIDEBAR_DEFAULT: f32 = 300.0;
 
 const SIDEBAR_MIN: f32 = 180.0;
@@ -316,6 +325,9 @@ pub(crate) enum Message {
     DeleteWorkspace(u64),
     /// Move a session to a workspace. None is the default workspace.
     MoveSession(String, Option<u64>),
+    /// Move an open tab to a workspace (the picker in its header). A tab
+    /// that runs a session moves the session too.
+    MoveTab(u64, Option<u64>),
     /// Show the name box for a session.
     RenameStart(Rename),
     RenameInput(String),
@@ -949,6 +961,17 @@ impl App {
                 }
                 self.workspaces_changed();
             }
+            Message::MoveTab(id, to) => {
+                let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+                match tab.session_id.clone() {
+                    // The session decides the tab's workspace (see adopt_tab_sessions).
+                    Some(sid) => return self.update(Message::MoveSession(sid, to)),
+                    None => {
+                        tab.workspace = to;
+                        self.workspaces_changed();
+                    }
+                }
+            }
             Message::RenameStart(target) => {
                 let current = match &target {
                     Rename::Session(sid) => self.session_names.get(sid).cloned(),
@@ -996,7 +1019,7 @@ impl App {
                 for tab in self.tabs.iter_mut().filter(|t| t.terminal_pin == Some(pin)) {
                     tab.terminal_pin = None;
                 }
-                self.save_state();
+                self.workspaces_changed();
             }
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
@@ -1212,7 +1235,8 @@ impl App {
             self.pinned.push(Pin::Terminal(PinnedTerminal { id: pin, name: tab.name.take(), cwd: tab.cwd.clone() }));
             tab.terminal_pin = Some(pin);
         }
-        self.save_state();
+        // The cached sidebar tree tells whether a search found anything.
+        self.workspaces_changed();
     }
 
     /// Go to a pinned terminal's tab, or start a new shell for it in its

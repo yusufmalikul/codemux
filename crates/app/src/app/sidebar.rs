@@ -7,9 +7,6 @@ use codemux_core::textmatch;
 use super::workspaces::{delete_workspace_confirm, workspace_header};
 use iced::widget::{column, stack};
 
-/// Soft gray for small text that only adds detail.
-const MUTED: iced::Color = iced::Color::from_rgb8(0x80, 0x80, 0x88);
-
 fn section(label: &'static str) -> Element<'static, Message> {
     // Space above so each group stands apart from the rows of the group before it.
     container(text(label).size(14)).padding(iced::Padding { top: 16.0, right: 4.0, bottom: 4.0, left: 4.0 }).into()
@@ -241,8 +238,7 @@ impl App {
         );
         list = list.push(lazy(deps, move |(_, _, _, _, _, _, tabs, _)| self.history_list(tabs)));
 
-        let mac = cfg!(target_os = "macos");
-        let key = |k: &str| if mac { format!("⌘{k}") } else { format!("Ctrl+Shift+{k}") };
+        let key = key_label;
         let mut top = column![row![
             self.search_box(),
             tooltip(
@@ -415,6 +411,15 @@ impl App {
         Some(row![open, unpin].spacing(4).align_y(iced::Alignment::Center).into())
     }
 
+    /// Something in the PINNED or OPEN block matches the search.
+    fn blocks_match(&self, tabs: &[TabRow], q: &str) -> bool {
+        tabs.iter().any(|t| self.tab_matches(t, q))
+            || self.pinned.iter().any(|pin| match pin {
+                Pin::Session(sid) => self.index.listed(sid).is_some_and(|m| self.session_matches(m, q)),
+                Pin::Terminal(p) => self.pinned_terminal_row(p, q).is_some(),
+            })
+    }
+
     /// The search filter for a tab: its session's title, folder, branch and
     /// conversation, or for a plain terminal its title and folder.
     fn tab_matches(&self, t: &TabRow, q: &str) -> bool {
@@ -490,6 +495,8 @@ impl App {
 
         // While searching, open every workspace so no match is hidden.
         let searching = !q.is_empty();
+        // Something in the tree matches the search.
+        let mut found = false;
 
         // Tabs per workspace.
         let ws_tabs = |id: Option<u64>| -> Vec<&TabRow> {
@@ -508,6 +515,7 @@ impl App {
             if searching && items.is_empty() && open_tabs.is_empty() {
                 continue;
             }
+            found = true;
             items.sort_by_key(|m| std::cmp::Reverse(m.sort_time()));
             let open = searching || !ws.collapsed;
             list = list.push(workspace_header(Some(ws.id), &ws.name, items.len() + open_tabs.len(), open_tabs.len(), open));
@@ -544,6 +552,13 @@ impl App {
         let open_tabs = ws_tabs(None);
         let open = searching || !self.default_collapsed;
         let count = prev.len() + rest.len() + open_tabs.len();
+        // Like the user's workspaces, an empty Default is left out while searching.
+        if searching && count == 0 {
+            if !found && !self.content_searching && !self.blocks_match(tabs, &q) {
+                list = list.push(container(text(format!("No sessions match “{}”", self.search)).size(13).color(MUTED)).padding([10, 4]));
+            }
+            return list.into();
+        }
         list = list.push(workspace_header(None, DEFAULT_WORKSPACE, count, open_tabs.len(), open));
         if !open {
             return list.into();

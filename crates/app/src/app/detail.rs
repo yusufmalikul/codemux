@@ -5,13 +5,33 @@ use super::*;
 use super::sidebar::{close_style, relative_time};
 use iced::widget::{column, stack};
 
+/// The rename hint waits a moment, so it does not flash up every time the
+/// mouse passes over a title.
+const RENAME_TIP_DELAY: Duration = Duration::from_millis(800);
+
 /// "Pin" or "Unpin", sending `msg`.
 fn pin_toggle(pinned: bool, msg: Message, size: u32) -> Element<'static, Message> {
     button(text(if pinned { "Unpin" } else { "Pin" }).size(size)).on_press(msg).style(button::secondary).into()
 }
 
+/// Shown when nothing is selected: what to do, and the app shortcuts, so
+/// they are easy to find.
 fn empty_state<'a>() -> Element<'a, Message> {
-    container(text("Pick a session on the left, or start a New session / New terminal.").size(14))
+    let mac = cfg!(target_os = "macos");
+    let keys = [
+        ("New session", key_label("N")),
+        ("New terminal", key_label("T")),
+        ("Search sessions", if mac { "⌘⇧F".into() } else { key_label("F") }),
+        ("Go to the next unread tab", key_label("J")),
+        ("Go to tab 1–9", if mac { "⌘1–⌘9".into() } else { key_label("1–9") }),
+        ("Hide or show sidebar", key_label("B")),
+        ("Close tab", key_label("W")),
+    ];
+    let mut list = column![].spacing(6);
+    for (action, key) in keys {
+        list = list.push(row![text(action).size(TEXT_SIZE).width(240), text(key).size(TEXT_SIZE).color(MUTED)]);
+    }
+    container(column![text("Pick a session on the left, or start a new one.").size(16), list].spacing(16))
         .center(Length::Fill)
         .into()
 }
@@ -37,6 +57,16 @@ impl App {
                         .spacing(8)
                         .align_y(iced::Alignment::Center)
                         .padding(8);
+                    if !self.workspaces.is_empty() {
+                        let choices = self.workspace_choices();
+                        let current = choices.iter().find(|c| c.id == tab.workspace).cloned();
+                        let id = tab.id;
+                        header = header.push(tooltip(
+                            pick_list(choices, current, move |c| Message::MoveTab(id, c.id)).text_size(12),
+                            container(text("Move to workspace").size(12)).padding(6).style(container::rounded_box),
+                            tooltip::Position::Bottom,
+                        ));
+                    }
                     header = header.push(match &tab.session_id {
                         Some(sid) if !terminal => self.pin_button(sid, 12),
                         _ => pin_toggle(tab.terminal_pin.is_some(), Message::TogglePinTab(tab.id), 12),
@@ -57,8 +87,7 @@ impl App {
                             .align_y(iced::Alignment::Center),
                         )
                     } else {
-                        let mac = cfg!(target_os = "macos");
-                        let close_key = if mac { "⌘W" } else { "Ctrl+Shift+W" };
+                        let close_key = key_label("W");
                         let tip = |label: String| container(text(label).size(12)).padding(6).style(container::rounded_box);
                         // Stop only while Claude works, so it is never a
                         // button that does nothing.
@@ -127,7 +156,10 @@ impl App {
                         row![
                             button(text("▶ Resume")).on_press(Message::Resume(m.id.clone())),
                             self.pin_button(&m.id, TEXT_SIZE),
-                            button(text("Delete")).on_press(Message::DeleteAsk(m.id.clone())).style(button::danger),
+                            // Quiet until hovered (then red): it sits next to
+                            // Resume, and deleting is rare. The question
+                            // after it is still loud.
+                            button(text("Delete")).on_press(Message::DeleteAsk(m.id.clone())).style(close_style),
                         ]
                         .spacing(8)
                         .into()
@@ -185,8 +217,8 @@ impl App {
         pin_toggle(self.is_session_pinned(sid), Message::TogglePin(sid.to_string()), size)
     }
 
-    /// A session's or terminal's title with a "Rename" button, or the name
-    /// box while it is being renamed.
+    /// A session's or terminal's title (double-click to rename it), or the
+    /// name box while it is being renamed.
     pub(super) fn title_or_rename(&self, target: Rename, title: String, size: u32, button_size: u32) -> Element<'_, Message> {
         if let Some((_, typed)) = self.renaming.as_ref().filter(|(t, _)| *t == target) {
             let hint = match target {
@@ -206,12 +238,14 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into();
         }
-        row![
-            text(title).size(size),
-            button(text("Rename").size(button_size)).padding([2, 8]).on_press(Message::RenameStart(target)).style(button::secondary),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center)
+        // No Rename button: it made every header busy. A double-click on
+        // the title renames, and a slow tooltip tells how.
+        tooltip(
+            mouse_area(text(title).size(size)).on_double_click(Message::RenameStart(target)),
+            container(text("Double-click to rename").size(12)).padding(6).style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .delay(RENAME_TIP_DELAY)
         .into()
     }
 }

@@ -115,7 +115,9 @@ and the Claude Code terminal on the right.
 
 ### 6.2 Right area
 
-- Header: title, folder, branch, last time, **Stop** button.
+- Header: title (double-click to rename), folder, branch, last time, workspace picker (once the
+  user has workspaces), **Stop** button.
+- Nothing selected: a short hint and the list of app shortcuts.
 - Terminal: fills the area, and resizes with the window.
 - If the session is not running yet: show a summary (title, last prompt, folder) and a
   **Continue** button (= `claude --resume`).

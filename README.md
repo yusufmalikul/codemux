@@ -47,7 +47,7 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 - **Search** by title, folder, branch or anything said in the conversation (your prompts and Claude's replies).
   Press ⌘⇧F to jump to the search box. The words you typed are marked in yellow. When a session matches by
   its conversation (or its folder or branch), a small gray line under its name shows the part that matched.
-  The ✕ in the box clears it.
+  When nothing matches, the sidebar says so. The ✕ in the box clears it.
 - **Status at a glance:** ● working, ◐ waiting for your input, ▸ plain shell, ○ not running.
 - **Notification when Claude waits.** When Claude finishes or asks you something in a tab you are not
   looking at, or while the window is in the background, you get a system notification.
@@ -55,15 +55,17 @@ Codemux never sends your session files anywhere and never calls the Claude API.
   have a yellow **unread** tag, and ⌘J goes to the next one.
 - **New session:** pick a folder and Claude starts there right away.
 - **Continue an old session** with one click (`claude --resume` under the hood).
-- **Rename** a session (a local label, only in Codemux), or a terminal tab from its header.
+- **Rename** a session (a local label, only in Codemux) or a terminal tab: double-click its title.
 - **Delete** a session for good, after you confirm. A running session can't be deleted.
 - **Stop** Claude's work with the ■ Stop button in the tab header (it shows only while Claude works, and
   sends Ctrl+C). The quiet ✕ next to it closes the tab and ends its process.
 
 ### Workspaces
 
-- Make your own workspaces (named groups) and move sessions into them.
-- Fold or unfold each workspace. Delete a workspace without losing its sessions.
+- Make your own workspaces (named groups) and move sessions into them. An open tab moves with the
+  workspace picker in its header.
+- Fold or unfold each workspace. Delete a workspace without losing its sessions (the ✕ shows when
+  the mouse is on its header).
 
 ### Terminal
 
@@ -93,6 +95,8 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 - Dark theme.
 
 ### Shortcuts
+
+With nothing selected, the main area lists these shortcuts.
 
 | Action | macOS | Linux / Windows |
 |---|---|---|

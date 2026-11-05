@@ -411,6 +411,8 @@ fn delete_workspace_asks_for_confirmation() {
 #[test]
 fn add_menu_opens_and_closes() {
     let (_dir, mut app) = fixture();
+    // Something selected: with nothing, the main area lists "New terminal" too.
+    let _ = app.update(Message::SelectSession("s1".into()));
     assert!(!found_after_frames(&mut app, vec![], "New terminal"), "menu shown before \"+\"");
     assert!(found_after_frames(&mut app, vec![Message::ToggleAddMenu], "New terminal"), "menu not shown");
     assert!(found_after_frames(&mut app, vec![], "New workspace"));
@@ -1295,7 +1297,6 @@ fn terminal_tabs_can_be_renamed() {
     let _ = app.update(Message::NewTerminal);
     let id = app.tabs[0].id;
     let (default, _) = app.tab_title(&app.tabs[0]);
-    assert!(found_after_frames(&mut app, vec![], "Rename"), "no Rename button for a terminal tab");
     let msgs = vec![Message::RenameStart(Rename::Tab(id)), Message::RenameInput("  Logs ".into()), Message::RenameSave];
     assert!(name_after_frames(&mut app, msgs, "Logs"), "new name not shown");
     assert!(!name_after_frames(&mut app, vec![], &default), "default name still shown");
@@ -1396,4 +1397,127 @@ fn unread_tabs_are_marked_and_reached_with_cmd_j() {
     // Nothing unread: ⌘J stays where it is.
     let _ = app.update(Message::NextUnread);
     assert_eq!(app.selected, Selected::Tab(ids[2]));
+}
+
+/// Click the target, apply what it sends, and return the messages.
+fn click_and_apply(app: &mut App, targets: &[&str]) -> Vec<Message> {
+    let mut ui = iced_test::simulator(app.view());
+    for t in targets {
+        ui.click(*t).unwrap_or_else(|e| panic!("cannot click {t:?}: {e:?}"));
+    }
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    for m in msgs.clone() {
+        let _ = app.update(m);
+    }
+    msgs
+}
+
+/// Once the user has made workspaces, the tab header has a workspace
+/// picker (MoveTab), so an open tab can move without being closed. A tab that runs
+/// a session moves its session too; a plain terminal moves only the tab.
+#[test]
+fn tab_header_moves_the_tab_to_another_workspace() {
+    let (_dir, mut app) = fixture();
+    let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
+    for m in [Message::NewWorkspaceStart, Message::NewWorkspaceName("Backend".into()), Message::NewWorkspaceCreate] {
+        let _ = app.update(m);
+    }
+    // The picker draws its text itself, so the sidebar shows the move.
+    let _ = app.update(Message::MoveTab(id, Some(1)));
+    assert_eq!(app.tabs[0].workspace, Some(1), "plain terminal not moved");
+    assert!(app.workspaces[0].sessions.is_empty());
+    let shown = std::mem::replace(&mut app.selected, Selected::None);
+    assert!(header_after_frames(&mut app, vec![], "▾ Backend", "(1)  ● 1 open"), "tab not in Backend");
+    app.selected = shown;
+
+    // A tab running a session takes its session along, both ways.
+    app.tabs[0].session_id = Some("s1".into());
+    let _ = app.update(Message::MoveTab(id, None));
+    assert_eq!(app.tabs[0].workspace, None);
+    assert_eq!(app.workspace_of("s1"), None);
+    let _ = app.update(Message::MoveTab(id, Some(1)));
+    assert_eq!(app.tabs[0].workspace, Some(1));
+    assert_eq!(app.workspace_of("s1"), Some(1), "session left behind");
+}
+
+/// A title is renamed by a double-click on it; there is no Rename button.
+/// A single click does nothing. This works for sessions and terminal tabs.
+#[test]
+fn double_click_on_a_title_renames_it() {
+    let (_dir, mut app) = fixture();
+    // Hide the sidebar, so the title can only be the one in the main area.
+    let msgs = vec![Message::SelectSession("s1".into()), Message::ToggleHideSidebar];
+    assert!(found_after_frames(&mut app, msgs, "Fix webhook retry"));
+    assert!(!found_after_frames(&mut app, vec![], "Rename"), "Rename button still shown");
+
+    let renames = |sent: &[Message]| sent.iter().filter(|m| matches!(m, Message::RenameStart(_))).count();
+    assert_eq!(renames(&click_and_apply(&mut app, &["Fix webhook retry"])), 0, "a single click renames");
+    let sent = click_and_apply(&mut app, &["Fix webhook retry", "Fix webhook retry"]);
+    assert!(sent.iter().any(|m| matches!(m, Message::RenameStart(Rename::Session(s)) if s == "s1")), "{sent:?}");
+    assert!(app.renaming.is_some());
+    let _ = app.update(Message::RenameCancel);
+
+    let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
+    let (title, _) = app.tab_title(&app.tabs[0]);
+    assert!(!found_after_frames(&mut app, vec![], "Rename"), "Rename button still shown on a tab");
+    let sent = click_and_apply(&mut app, &[&title, &title]);
+    assert!(sent.iter().any(|m| matches!(m, Message::RenameStart(Rename::Tab(t)) if *t == id)), "{sent:?}");
+}
+
+/// The ✕ that deletes a workspace sits at the right end of its header and
+/// still asks first when clicked.
+#[test]
+fn workspace_delete_button_still_asks_first() {
+    let (_dir, mut app) = fixture();
+    for m in [Message::NewWorkspaceStart, Message::NewWorkspaceName("Backend".into()), Message::NewWorkspaceCreate] {
+        let _ = app.update(m);
+    }
+    let sent = click_and_apply(&mut app, &["✕"]);
+    assert!(sent.iter().any(|m| matches!(m, Message::DeleteWorkspaceAsk(1))), "{sent:?}");
+    assert_eq!(app.workspaces.len(), 1);
+    assert!(found_after_frames(&mut app, vec![], "Delete \"Backend\"? Its sessions move to Default."));
+}
+
+/// With nothing selected, the main area lists the app shortcuts, so they
+/// are easy to find.
+#[test]
+fn empty_main_area_lists_the_shortcuts() {
+    let (_dir, mut app) = fixture();
+    app.selected = Selected::None;
+    let (new, unread) = if cfg!(target_os = "macos") { ("⌘N", "⌘J") } else { ("Ctrl+Shift+N", "Ctrl+Shift+J") };
+    assert!(found_after_frames(&mut app, vec![], "New terminal"), "no shortcut list");
+    assert!(found_after_frames(&mut app, vec![], new));
+    assert!(found_after_frames(&mut app, vec![], "Go to the next unread tab"));
+    assert!(found_after_frames(&mut app, vec![], unread));
+}
+
+/// A search that finds nothing says so, instead of an empty Default
+/// workspace with "(0)". Nothing is said while the conversation search
+/// still runs, or when an open tab matches.
+#[test]
+fn search_with_no_match_says_so() {
+    let (_dir, mut app) = fixture();
+    let msgs = vec![Message::Search("no such thing".into())];
+    assert!(found_after_frames(&mut app, msgs, "No sessions match “no such thing”"), "no message");
+    assert!(!found_after_frames(&mut app, vec![], "▾ Default"), "empty Default still shown");
+
+    assert!(!found_after_frames(&mut app, vec![Message::Search("webhook".into())], "No sessions match “webhook”"));
+
+    // Still searching the conversations: it may yet find something.
+    let _ = app.update(Message::Search("no such thing".into()));
+    app.content_searching = true;
+    app.content_hits_version += 1;
+    assert!(!found_after_frames(&mut app, vec![], "No sessions match “no such thing”"), "said too early");
+    app.content_searching = false;
+    app.content_hits_version += 1;
+
+    // An open terminal that matches by its name is a result.
+    let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
+    for m in [Message::RenameStart(Rename::Tab(id)), Message::RenameInput("Logs".into()), Message::RenameSave, Message::Search("logs".into())] {
+        let _ = app.update(m);
+    }
+    assert!(!found_after_frames(&mut app, vec![], "No sessions match “logs”"), "said with a matching tab");
 }

@@ -3,7 +3,7 @@
 use super::*;
 use super::ellipsis::ellipsis;
 use super::sidebar::close_style;
-use iced::widget::column;
+use iced::widget::{column, hover, space};
 
 /// One choice in the "Workspace" picker. `id` None is the default workspace.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,10 +33,29 @@ pub(super) fn workspace_header(id: Option<u64>, name: &str, count: usize, open_t
         .on_press(Message::ToggleWorkspace(id))
         .width(Length::Fill)
         .style(button::text);
-    let mut line = row![toggle].spacing(4).align_y(iced::Alignment::Center);
-    if let Some(id) = id {
-        line = line.push(button(text("✕").size(13)).padding([4, 10]).on_press(Message::DeleteWorkspaceAsk(id)).style(close_style));
-    }
+    let line: Element<'static, Message> = match id {
+        // The ✕ shows only while the mouse is on the header: it is rarely
+        // needed, and it sits next to a row that is clicked often. The
+        // base keeps a clear spot of the same size for it, so a long name
+        // never runs under it.
+        Some(id) => {
+            let delete = |on: bool| {
+                let label = text("✕").size(13);
+                let label = if on { label } else { label.color(iced::Color::TRANSPARENT) };
+                let b = button(label).padding([4, 10]).style(close_style);
+                if on { b.on_press(Message::DeleteWorkspaceAsk(id)) } else { b }
+            };
+            let base = row![toggle, delete(false)].spacing(4).align_y(iced::Alignment::Center);
+            let top = row![space::horizontal(), tooltip(
+                delete(true),
+                container(text("Delete workspace").size(12)).padding(6).style(container::rounded_box),
+                tooltip::Position::Left,
+            )]
+            .align_y(iced::Alignment::Center);
+            hover(base, top)
+        }
+        None => toggle.into(),
+    };
     container(line)
         .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
         .into()
