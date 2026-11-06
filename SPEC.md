@@ -97,7 +97,8 @@ and the Claude Code terminal on the right.
      (and its workspace count), but keeps its workspace for when it is unpinned. While it is open in a
      tab it stays here, shown as its tab (bold, with a close button), not in Open. ⌘1–9 counts pinned
      tabs first, then the Open tabs, so the shortcut order matches the screen. Pin/Unpin is a button in
-     the session view and in a tab's header, right after the title, so it is close at hand.
+     the session view, in a tab's header, and on an open tab's sidebar row next to its ✕ (shown only
+     while the mouse is on the row).
   2. **Open**: not pinned, and has a terminal running in the app (including a "New terminal" tab, even if it has not
      started Claude yet). One block for the tabs of all workspaces, in tab order (the ⌘1–9 order),
      each row with its workspace name. It stays above the tree and does not scroll with it, so

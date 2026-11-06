@@ -52,13 +52,7 @@ impl App {
                         Some(sid) if !terminal => Rename::Session(sid.clone()),
                         _ => Rename::Tab(tab.id),
                     };
-                    // Pin sits right after the title, so it is close at hand
-                    // after picking a session in the sidebar.
-                    let pin = match &tab.session_id {
-                        Some(sid) if !terminal => self.pin_button(sid, 12),
-                        _ => pin_toggle(tab.terminal_pin.is_some(), Message::TogglePinTab(tab.id), 12),
-                    };
-                    let heading = row![self.title_or_rename(target, title, 15, 12), pin].spacing(8).align_y(iced::Alignment::Center);
+                    let heading = self.title_or_rename(target, title, 15, 12);
                     let mut header = row![column![heading, text(info.join(" · ")).size(11)].width(Length::Fill)]
                         .spacing(8)
                         .align_y(iced::Alignment::Center)
@@ -73,6 +67,10 @@ impl App {
                             tooltip::Position::Bottom,
                         ));
                     }
+                    header = header.push(match &tab.session_id {
+                        Some(sid) if !terminal => self.pin_button(sid, 12),
+                        _ => pin_toggle(tab.terminal_pin.is_some(), Message::TogglePinTab(tab.id), 12),
+                    });
                     if let Some(sid) = tab.session_id.as_ref().filter(|_| !self.accounts.is_empty() && tab.kind == TabKind::Claude) {
                         header = header.push(self.account_picker(sid, self.tab_account(tab), 12));
                     }
@@ -118,13 +116,7 @@ impl App {
             Selected::Session(sid) => match self.index.get(sid) {
                 Some(m) => {
                     let mut col = column![
-                        // Pin right after the title, close at hand.
-                        row![
-                            self.title_or_rename(Rename::Session(m.id.clone()), self.session_title(m), 22, SMALL_TEXT_SIZE),
-                            self.pin_button(&m.id, TEXT_SIZE),
-                        ]
-                        .spacing(10)
-                        .align_y(iced::Alignment::Center),
+                        self.title_or_rename(Rename::Session(m.id.clone()), self.session_title(m), 22, SMALL_TEXT_SIZE),
                         text(m.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default()).size(TEXT_SIZE),
                     ]
                     .spacing(8);
@@ -163,6 +155,7 @@ impl App {
                     } else {
                         row![
                             button(text("▶ Resume")).on_press(Message::Resume(m.id.clone())),
+                            self.pin_button(&m.id, TEXT_SIZE),
                             // Quiet until hovered (then red): it sits next to
                             // Resume, and deleting is rare. The question
                             // after it is still loud.

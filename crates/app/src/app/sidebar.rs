@@ -5,7 +5,7 @@ use super::accounts::account_badge;
 use super::ellipsis::ellipsis;
 use codemux_core::textmatch;
 use super::workspaces::{delete_workspace_confirm, workspace_header};
-use iced::widget::{column, stack};
+use iced::widget::{column, hover, space, stack};
 
 fn section(label: &'static str) -> Element<'static, Message> {
     // Space above so each group stands apart from the rows of the group before it.
@@ -31,6 +31,11 @@ pub(super) struct TabRow {
     why: Option<String>,
     /// The pinned terminal this tab runs, if any.
     terminal_pin: Option<u64>,
+    /// The tab is in PINNED: its button says Unpin.
+    pinned: bool,
+    /// The session its Pin button pins, or None to pin the tab as a
+    /// terminal (like the Pin button in the tab's header).
+    pin_session: Option<String>,
     /// Claude started waiting while the user looked elsewhere, and they
     /// have not opened the tab since (the tabs counted on the Dock).
     unread: bool,
@@ -58,13 +63,19 @@ fn tab_row(t: &TabRow, query: &str) -> Element<'static, Message> {
         border: iced::border::rounded(4),
         ..container::Style::default()
     });
-    row![
-        tab,
-        button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(t.id)).style(close_style),
-    ]
-    .spacing(4)
-    .align_y(iced::Alignment::Center)
-    .into()
+    let close = || button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(t.id)).style(close_style);
+    // Pin shows only while the mouse is on the row, next to the ✕, so it
+    // is close at hand without making every row busy. It covers the end
+    // of the row while shown, instead of keeping a clear spot for it: a
+    // spot would cut every title shorter all the time.
+    let pin_msg = match &t.pin_session {
+        Some(sid) => Message::TogglePin(sid.clone()),
+        None => Message::TogglePinTab(t.id),
+    };
+    let pin = button(text(if t.pinned { "Unpin" } else { "Pin" }).size(12)).padding([4, 8]).on_press(pin_msg).style(button::secondary);
+    let base = row![tab, close()].spacing(4).align_y(iced::Alignment::Center);
+    let top = row![space::horizontal(), pin, close()].spacing(4).align_y(iced::Alignment::Center);
+    hover(base, top)
 }
 
 /// Small gray name of the tab's workspace. The title before it fills the
@@ -216,6 +227,8 @@ impl App {
                     why: self.tab_why(tab),
                     terminal_pin: tab.terminal_pin,
                     unread: tab.unseen,
+                    pinned: self.is_pinned_tab(tab),
+                    pin_session: tab.session_id.clone().filter(|_| !self.is_terminal_tab(tab)),
                 }
             })
             .collect();

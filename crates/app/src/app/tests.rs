@@ -1522,25 +1522,50 @@ fn search_with_no_match_says_so() {
     assert!(!found_after_frames(&mut app, vec![], "No sessions match “logs”"), "said with a matching tab");
 }
 
-/// The Pin button sits right after the title, in a tab header and in the
-/// detail view of a closed session, so it is close at hand after picking a
-/// session in the sidebar.
+/// An open tab's row in the sidebar has a Pin button next to its ✕, shown
+/// only while the mouse is on the row. A click on it pins the tab.
 #[test]
-fn pin_button_sits_next_to_the_title() {
-    let (_dir, mut app) = fixture();
-    let next_to = |texts: &[(String, iced::Rectangle)], title: &str, pin: &str| {
-        let p = texts.iter().find(|(s, _)| s == pin).map(|(_, b)| *b).expect("no Pin button");
-        texts.iter().filter(|(s, _)| s == title).any(|(_, t)| {
-            let gap = p.x - (t.x + t.width);
-            gap >= 0.0 && gap < 40.0 && (p.center_y() - t.center_y()).abs() < 12.0
-        })
-    };
-
-    let texts = texts_after_frames(&mut app, vec![Message::SelectSession("s1".into())]);
-    assert!(next_to(&texts, "Fix webhook retry", "Pin"), "Pin not next to the session title");
-
+fn sidebar_tab_row_shows_pin_on_hover() {
+    let (dir, mut app) = fixture();
     let _ = app.update(Message::NewTerminal);
+    let id = app.tabs[0].id;
     let (title, _) = app.tab_title(&app.tabs[0]);
+    app.selected = Selected::None;
+
+    // The Pin button on the tab's row, right of its title.
     let texts = texts_after_frames(&mut app, vec![]);
-    assert!(next_to(&texts, &title, "Pin"), "Pin not next to the tab title");
+    let t = texts.iter().find(|(s, _)| *s == title).map(|(_, b)| *b).expect("tab row not shown");
+    let pin = texts
+        .iter()
+        .find(|(s, b)| s == "Pin" && (b.center_y() - t.center_y()).abs() < 12.0 && b.x > t.x)
+        .map(|(_, b)| *b)
+        .expect("no Pin button on the tab row");
+
+    // Is the Pin text drawn? Look at its pixels: one flat color = hidden.
+    let shot = |app: &App, cursor: iced::Point, name: &str| -> bool {
+        let settings = iced_test::core::Settings::default();
+        let mut ui = iced_test::Simulator::with_size(settings, (1280.0, 800.0), app.view());
+        ui.point_at(cursor);
+        let path = dir.path().join(format!("{name}.png"));
+        assert!(ui.snapshot(&app.theme()).unwrap().matches_image(&path).unwrap());
+        let file = std::fs::File::open(dir.path().join(format!("{name}-wgpu.png"))).unwrap();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        let (w, scale) = (info.width as usize, 2.0);
+        let px = |x: usize, y: usize| &buf[(y * w + x) * 4..(y * w + x) * 4 + 4];
+        let (x0, y0) = ((pin.x * scale) as usize, (pin.y * scale) as usize);
+        let (x1, y1) = (((pin.x + pin.width) * scale) as usize, ((pin.y + pin.height) * scale) as usize);
+        let first = px(x0, y0).to_vec();
+        (y0..y1).any(|y| (x0..x1).any(|x| px(x, y) != first.as_slice()))
+    };
+    assert!(!shot(&app, iced::Point::new(1000.0, 700.0), "away"), "Pin shown without hover");
+    assert!(shot(&app, t.center(), "hover"), "Pin not shown on hover");
+
+    // A click on it pins the tab.
+    let mut ui = iced_test::Simulator::with_size(iced_test::core::Settings::default(), (1280.0, 800.0), app.view());
+    ui.point_at(pin.center());
+    let _ = ui.simulate(iced_test::simulator::click());
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::TogglePinTab(i) if *i == id)), "click did not pin: {msgs:?}");
 }
