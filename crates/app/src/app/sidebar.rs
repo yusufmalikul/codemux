@@ -64,18 +64,22 @@ fn tab_row(t: &TabRow, query: &str) -> Element<'static, Message> {
         ..container::Style::default()
     });
     let close = || button(text("✕").size(15)).padding([10, 12]).on_press(Message::CloseTab(t.id)).style(close_style);
-    // Pin shows only while the mouse is on the row, next to the ✕, so it
-    // is close at hand without making every row busy. It covers the end
-    // of the row while shown, instead of keeping a clear spot for it: a
-    // spot would cut every title shorter all the time.
     let pin_msg = match &t.pin_session {
         Some(sid) => Message::TogglePin(sid.clone()),
         None => Message::TogglePinTab(t.id),
     };
-    let pin = button(text(if t.pinned { "Unpin" } else { "Pin" }).size(12)).padding([4, 8]).on_press(pin_msg).style(button::secondary);
     let base = row![tab, close()].spacing(4).align_y(iced::Alignment::Center);
-    let top = row![space::horizontal(), pin, close()].spacing(4).align_y(iced::Alignment::Center);
+    let top = row![space::horizontal(), pin_button(t.pinned, pin_msg), close()].spacing(4).align_y(iced::Alignment::Center);
     hover(base, top)
+}
+
+/// "Pin" or "Unpin" on a sidebar row. It shows only while the mouse is on
+/// the row (see `hover`), at the row's right end, so it is close at hand
+/// without making every row busy. It covers the end of the row while
+/// shown, instead of keeping a clear spot for it: a spot would cut every
+/// title shorter all the time.
+fn pin_button(pinned: bool, msg: Message) -> Element<'static, Message> {
+    button(text(if pinned { "Unpin" } else { "Pin" }).size(12)).padding([4, 8]).on_press(msg).style(button::secondary).into()
 }
 
 /// Small gray name of the tab's workspace. The title before it fills the
@@ -602,10 +606,15 @@ impl App {
         let label = row![row_label(self.session_title(m), false, &self.search), account_badge(&self.account_tag(m.account))]
             .spacing(8)
             .align_y(iced::Alignment::Center);
-        button(with_why(label.into(), self.match_why(m), &self.search))
+        let base = button(with_why(label.into(), self.match_why(m), &self.search))
             .on_press(Message::SelectSession(m.id.clone()))
             .width(Length::Fill)
-            .style(if selected { button::primary } else { button::text })
-            .into()
+            .style(if selected { button::primary } else { button::text });
+        let pin = pin_button(self.is_session_pinned(&m.id), Message::TogglePin(m.id.clone()));
+        let top = container(row![space::horizontal(), pin].align_y(iced::Alignment::Center))
+            .height(Length::Fill)
+            .align_y(iced::Alignment::Center)
+            .padding(iced::Padding { right: 4.0, ..iced::Padding::ZERO });
+        hover(base, top)
     }
 }

@@ -35,7 +35,7 @@ Codemux never sends your session files anywhere and never calls the Claude API.
 
 ### Sessions
 
-- **Pin sessions.** Press **Pin** on a session (or in a tab's header, or next to an open tab's ✕ in the sidebar while the mouse is on it) to keep it in a PINNED block
+- **Pin sessions.** Press **Pin** on a session (or in a tab's header, or at the right end of any session's row in the sidebar while the mouse is on it) to keep it in a PINNED block
   at the very top of the sidebar, above the open tabs. It stays there while it is open in a tab, and
   ⌘1–9 counts pinned tabs first. Pins are remembered after a restart.
   Plain terminal tabs can be pinned too: a pinned terminal stays in PINNED after its tab closes, and a click

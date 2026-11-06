@@ -1522,6 +1522,49 @@ fn search_with_no_match_says_so() {
     assert!(!found_after_frames(&mut app, vec![], "No sessions match “logs”"), "said with a matching tab");
 }
 
+/// The Pin button on the sidebar row whose title is `title`: right of the
+/// title, on the same line. Also returns the title's bounds.
+fn row_pin(app: &mut App, title: &str, label: &str) -> (iced::Rectangle, iced::Rectangle) {
+    let texts = texts_after_frames(app, vec![]);
+    let t = texts.iter().find(|(s, _)| s == title).map(|(_, b)| *b).expect("row not shown");
+    let pin = texts
+        .iter()
+        .find(|(s, b)| s == label && (b.center_y() - t.center_y()).abs() < 12.0 && b.x > t.x && b.x < SIDEBAR_WIDTH_TEST)
+        .map(|(_, b)| *b)
+        .unwrap_or_else(|| panic!("no {label} button on the row of {title}"));
+    (t, pin)
+}
+
+/// Rows live in the sidebar, left of this x.
+const SIDEBAR_WIDTH_TEST: f32 = 300.0;
+
+/// Is anything drawn inside `rect` with the mouse at `cursor`? Draws the
+/// screen and looks at the pixels: one flat color means nothing is there.
+/// (Text selectors can't tell: `hover` walks its hidden top layer too.)
+fn drawn_in(app: &App, dir: &std::path::Path, rect: iced::Rectangle, cursor: iced::Point, name: &str) -> bool {
+    let mut ui = iced_test::Simulator::with_size(iced_test::core::Settings::default(), (1280.0, 800.0), app.view());
+    ui.point_at(cursor);
+    assert!(ui.snapshot(&app.theme()).unwrap().matches_image(dir.join(format!("{name}.png"))).unwrap());
+    let file = std::fs::File::open(dir.join(format!("{name}-wgpu.png"))).unwrap();
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let (w, scale) = (info.width as usize, 2.0);
+    let px = |x: usize, y: usize| &buf[(y * w + x) * 4..(y * w + x) * 4 + 4];
+    let (x0, y0) = ((rect.x * scale) as usize, (rect.y * scale) as usize);
+    let (x1, y1) = (((rect.x + rect.width) * scale) as usize, ((rect.y + rect.height) * scale) as usize);
+    let first = px(x0, y0).to_vec();
+    (y0..y1).any(|y| (x0..x1).any(|x| px(x, y) != first.as_slice()))
+}
+
+/// The messages a click at `at` sends.
+fn click_at(app: &App, at: iced::Point) -> Vec<Message> {
+    let mut ui = iced_test::Simulator::with_size(iced_test::core::Settings::default(), (1280.0, 800.0), app.view());
+    ui.point_at(at);
+    let _ = ui.simulate(iced_test::simulator::click());
+    ui.into_messages().collect()
+}
+
 /// An open tab's row in the sidebar has a Pin button next to its ✕, shown
 /// only while the mouse is on the row. A click on it pins the tab.
 #[test]
@@ -1531,41 +1574,26 @@ fn sidebar_tab_row_shows_pin_on_hover() {
     let id = app.tabs[0].id;
     let (title, _) = app.tab_title(&app.tabs[0]);
     app.selected = Selected::None;
-
-    // The Pin button on the tab's row, right of its title.
-    let texts = texts_after_frames(&mut app, vec![]);
-    let t = texts.iter().find(|(s, _)| *s == title).map(|(_, b)| *b).expect("tab row not shown");
-    let pin = texts
-        .iter()
-        .find(|(s, b)| s == "Pin" && (b.center_y() - t.center_y()).abs() < 12.0 && b.x > t.x)
-        .map(|(_, b)| *b)
-        .expect("no Pin button on the tab row");
-
-    // Is the Pin text drawn? Look at its pixels: one flat color = hidden.
-    let shot = |app: &App, cursor: iced::Point, name: &str| -> bool {
-        let settings = iced_test::core::Settings::default();
-        let mut ui = iced_test::Simulator::with_size(settings, (1280.0, 800.0), app.view());
-        ui.point_at(cursor);
-        let path = dir.path().join(format!("{name}.png"));
-        assert!(ui.snapshot(&app.theme()).unwrap().matches_image(&path).unwrap());
-        let file = std::fs::File::open(dir.path().join(format!("{name}-wgpu.png"))).unwrap();
-        let mut reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
-        let info = reader.next_frame(&mut buf).unwrap();
-        let (w, scale) = (info.width as usize, 2.0);
-        let px = |x: usize, y: usize| &buf[(y * w + x) * 4..(y * w + x) * 4 + 4];
-        let (x0, y0) = ((pin.x * scale) as usize, (pin.y * scale) as usize);
-        let (x1, y1) = (((pin.x + pin.width) * scale) as usize, ((pin.y + pin.height) * scale) as usize);
-        let first = px(x0, y0).to_vec();
-        (y0..y1).any(|y| (x0..x1).any(|x| px(x, y) != first.as_slice()))
-    };
-    assert!(!shot(&app, iced::Point::new(1000.0, 700.0), "away"), "Pin shown without hover");
-    assert!(shot(&app, t.center(), "hover"), "Pin not shown on hover");
-
-    // A click on it pins the tab.
-    let mut ui = iced_test::Simulator::with_size(iced_test::core::Settings::default(), (1280.0, 800.0), app.view());
-    ui.point_at(pin.center());
-    let _ = ui.simulate(iced_test::simulator::click());
-    let msgs: Vec<Message> = ui.into_messages().collect();
+    let (t, pin) = row_pin(&mut app, &title, "Pin");
+    assert!(!drawn_in(&app, dir.path(), pin, iced::Point::new(1000.0, 700.0), "away"), "Pin shown without hover");
+    assert!(drawn_in(&app, dir.path(), pin, t.center(), "hover"), "Pin not shown on hover");
+    let msgs = click_at(&app, pin.center());
     assert!(msgs.iter().any(|m| matches!(m, Message::TogglePinTab(i) if *i == id)), "click did not pin: {msgs:?}");
+}
+
+/// A session row in the tree (not open in a tab) has the same hover Pin
+/// button, and a pinned one in PINNED has Unpin.
+#[test]
+fn sidebar_session_row_shows_pin_on_hover() {
+    let (dir, mut app) = fixture();
+    let (t, pin) = row_pin(&mut app, "Fix webhook retry", "Pin");
+    assert!(!drawn_in(&app, dir.path(), pin, iced::Point::new(1000.0, 700.0), "away"), "Pin shown without hover");
+    assert!(drawn_in(&app, dir.path(), pin, t.center(), "hover"), "Pin not shown on hover");
+    let msgs = click_at(&app, pin.center());
+    assert!(msgs.iter().any(|m| matches!(m, Message::TogglePin(s) if s == "s1")), "click did not pin: {msgs:?}");
+
+    let _ = app.update(Message::TogglePin("s1".into()));
+    let (_, unpin) = row_pin(&mut app, "Fix webhook retry", "Unpin");
+    let msgs = click_at(&app, unpin.center());
+    assert!(msgs.iter().any(|m| matches!(m, Message::TogglePin(s) if s == "s1")), "click did not unpin: {msgs:?}");
 }
