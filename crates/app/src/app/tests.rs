@@ -1521,3 +1521,26 @@ fn search_with_no_match_says_so() {
     }
     assert!(!found_after_frames(&mut app, vec![], "No sessions match “logs”"), "said with a matching tab");
 }
+
+/// The Pin button sits right after the title, in a tab header and in the
+/// detail view of a closed session, so it is close at hand after picking a
+/// session in the sidebar.
+#[test]
+fn pin_button_sits_next_to_the_title() {
+    let (_dir, mut app) = fixture();
+    let next_to = |texts: &[(String, iced::Rectangle)], title: &str, pin: &str| {
+        let p = texts.iter().find(|(s, _)| s == pin).map(|(_, b)| *b).expect("no Pin button");
+        texts.iter().filter(|(s, _)| s == title).any(|(_, t)| {
+            let gap = p.x - (t.x + t.width);
+            gap >= 0.0 && gap < 40.0 && (p.center_y() - t.center_y()).abs() < 12.0
+        })
+    };
+
+    let texts = texts_after_frames(&mut app, vec![Message::SelectSession("s1".into())]);
+    assert!(next_to(&texts, "Fix webhook retry", "Pin"), "Pin not next to the session title");
+
+    let _ = app.update(Message::NewTerminal);
+    let (title, _) = app.tab_title(&app.tabs[0]);
+    let texts = texts_after_frames(&mut app, vec![]);
+    assert!(next_to(&texts, &title, "Pin"), "Pin not next to the tab title");
+}
