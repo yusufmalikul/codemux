@@ -1597,3 +1597,31 @@ fn sidebar_session_row_shows_pin_on_hover() {
     let msgs = click_at(&app, unpin.center());
     assert!(msgs.iter().any(|m| matches!(m, Message::TogglePin(s) if s == "s1")), "click did not unpin: {msgs:?}");
 }
+
+/// PINNED, OPEN and the tree each scroll on their own, so a line sits
+/// between them: the user can see where one block ends and the next one
+/// starts (and which one the mouse wheel moves).
+#[test]
+fn sidebar_blocks_are_split_by_a_line() {
+    let (dir, mut app) = fixture();
+    let _ = app.update(Message::TogglePin("s1".into()));
+    let _ = app.update(Message::NewTerminal);
+    let (title, _) = app.tab_title(&app.tabs[0]);
+    app.selected = Selected::None;
+    let texts = texts_after_frames(&mut app, vec![]);
+    let find = |s: &str| texts.iter().find(|(t, b)| t == s && b.x < SIDEBAR_WIDTH_TEST).map(|(_, b)| *b).unwrap_or_else(|| panic!("{s} not shown"));
+    let pinned_row = find("Fix webhook retry");
+    let open = find("OPEN");
+    let tab = find(&title);
+    let below_tab = texts
+        .iter()
+        .filter(|(_, b)| b.x < SIDEBAR_WIDTH_TEST && b.y > tab.y + tab.height)
+        .map(|(_, b)| *b)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .expect("no tree below OPEN");
+    // Thin strips in the empty space between blocks, away from any text.
+    let strip = |top: f32, bottom: f32| iced::Rectangle { x: 120.0, y: top, width: 20.0, height: bottom - top };
+    let away = iced::Point::new(1000.0, 700.0);
+    assert!(drawn_in(&app, dir.path(), strip(pinned_row.y + pinned_row.height + 10.0, open.y - 2.0), away, "pinned-open"), "no line between PINNED and OPEN");
+    assert!(drawn_in(&app, dir.path(), strip(tab.y + tab.height + 14.0, below_tab.y - 2.0), away, "open-tree"), "no line between OPEN and the tree");
+}

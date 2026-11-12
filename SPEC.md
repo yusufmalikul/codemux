@@ -103,6 +103,8 @@ and the Claude Code terminal on the right.
      started Claude yet). One block for the tabs of all workspaces, in tab order (the ⌘1–9 order),
      each row with its workspace name. It stays above the tree and does not scroll with it, so
      switching between tabs never needs a scroll. Past a set height it scrolls on its own.
+     A thin line sits below Pinned and below Open, so it is clear where each block (each with its own
+     scroll) ends.
   3. **Previously open**: was open when the app closed or the OS restarted
   4. **Today**, **Yesterday**, **Last 7 days**, **Last 30 days**, **Older**
      (based on the last activity time)

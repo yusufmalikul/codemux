@@ -313,11 +313,14 @@ impl App {
 
         let scrolling = self.sidebar_scrolled.is_some();
         let mut sidebar = column![top].spacing(8);
+        // PINNED, OPEN and the tree each scroll on their own. A line between
+        // them shows where one block ends, so it is clear which part the
+        // mouse wheel moves.
         if let Some(pinned) = pinned {
-            sidebar = sidebar.push(pinned);
+            sidebar = sidebar.push(pinned).push(rule::horizontal(1));
         }
         if let Some(open) = open {
-            sidebar = sidebar.push(open);
+            sidebar = sidebar.push(open).push(rule::horizontal(1));
         }
         sidebar.push(
             // A thin scrollbar with a small gap, so the rows (and their close
