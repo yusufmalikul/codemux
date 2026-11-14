@@ -1625,3 +1625,71 @@ fn sidebar_blocks_are_split_by_a_line() {
     assert!(drawn_in(&app, dir.path(), strip(pinned_row.y + pinned_row.height + 10.0, open.y - 2.0), away, "pinned-open"), "no line between PINNED and OPEN");
     assert!(drawn_in(&app, dir.path(), strip(tab.y + tab.height + 14.0, below_tab.y - 2.0), away, "open-tree"), "no line between OPEN and the tree");
 }
+
+/// Add sessions to the fixture, titled "{prefix} {i}" for i in 1..=n, and
+/// reopen the app on them.
+fn with_sessions(dir: &std::path::Path, prefix: &str, n: usize) -> App {
+    let proj = dir.join("projects").join("-tmp-proj");
+    let now = Utc::now().to_rfc3339();
+    for i in 1..=n {
+        std::fs::write(
+            proj.join(format!("{prefix}{i}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"{prefix}{i}\",\"cwd\":\"/tmp\",\"timestamp\":\"{now}\",\"message\":{{\"content\":\"hi\"}}}}\n\
+                 {{\"type\":\"ai-title\",\"aiTitle\":\"{prefix} {i}\",\"sessionId\":\"{prefix}{i}\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    reopen(dir)
+}
+
+/// Open a tab running the session, as if Claude resumed it there.
+fn open_session_tab(app: &mut App, sid: &str) {
+    let _ = app.update(Message::NewTerminal);
+    let last = app.tabs.len() - 1;
+    app.tabs[last].session_id = Some(sid.into());
+    app.adopt_tab_sessions();
+}
+
+/// Names of the given rows that are on screen in the sidebar.
+fn rows_on_screen(app: &mut App, names: &[String]) -> Vec<String> {
+    let texts = texts_after_frames(app, vec![]);
+    names.iter().filter(|n| texts.iter().any(|(t, b)| t == *n && b.x < SIDEBAR_WIDTH_TEST && b.height > 1.0)).cloned().collect()
+}
+
+/// PINNED shows at most 10 rows; the rest scroll inside the block. Pinned
+/// sessions that are open in a tab come first, so the ones in use are
+/// always in view, then the closed ones, each in pin order.
+#[test]
+fn pinned_block_shows_ten_rows_open_ones_first() {
+    let (dir, _) = fixture();
+    let mut app = with_sessions(dir.path(), "Pin", 12);
+    for i in 1..=12 {
+        let _ = app.update(Message::TogglePin(format!("Pin{i}")));
+    }
+    for i in [11, 12] {
+        open_session_tab(&mut app, &format!("Pin{i}"));
+    }
+    app.selected = Selected::None;
+    let names: Vec<String> = [11, 12].into_iter().chain(1..=10).map(|i| format!("Pin {i}")).collect();
+    let shown = rows_on_screen(&mut app, &names);
+    assert_eq!(shown, names[..10], "PINNED must show the open ones first, then 10 rows in all");
+    let texts = texts_after_frames(&mut app, vec![]);
+    let y = |n: &str| texts.iter().find(|(t, b)| t == n && b.x < SIDEBAR_WIDTH_TEST).map(|(_, b)| b.y).unwrap();
+    assert!(y("Pin 11") < y("Pin 12") && y("Pin 12") < y("Pin 1"), "open pinned rows not on top in pin order");
+    assert!(!texts.iter().any(|(t, b)| (t == "Pin 9" || t == "Pin 10") && b.x < SIDEBAR_WIDTH_TEST), "an 11th or 12th row is in view");
+}
+
+/// OPEN shows at most 10 tabs; the rest scroll inside the block.
+#[test]
+fn open_block_shows_ten_rows() {
+    let (dir, _) = fixture();
+    let mut app = with_sessions(dir.path(), "Tab", 12);
+    for i in 1..=12 {
+        open_session_tab(&mut app, &format!("Tab{i}"));
+    }
+    app.selected = Selected::None;
+    let names: Vec<String> = (1..=12).map(|i| format!("Tab {i}")).collect();
+    assert_eq!(rows_on_screen(&mut app, &names), names[..10], "OPEN must show exactly 10 rows");
+}

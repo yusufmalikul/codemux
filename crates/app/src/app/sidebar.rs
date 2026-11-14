@@ -3,6 +3,7 @@
 use super::*;
 use super::accounts::account_badge;
 use super::ellipsis::ellipsis;
+use super::max_rows::max_rows;
 use codemux_core::textmatch;
 use super::workspaces::{delete_workspace_confirm, workspace_header};
 use iced::widget::{column, hover, space, stack};
@@ -141,6 +142,14 @@ fn with_why(label: Element<'static, Message>, why: Option<String>, query: &str) 
         Some(why) => column![label, ellipsis(why).size(SMALL_TEXT_SIZE).color(MUTED).mark(query)].spacing(2).into(),
         None => label,
     }
+}
+
+/// A PINNED or OPEN block (its header, then its rows) that grows up to
+/// BLOCK_MAX_ROWS rows and scrolls the rest, with the same thin scrollbar
+/// as the tree.
+fn block_scroll(list: Column<'static, Message>) -> Element<'static, Message> {
+    let list = scrollable(list).direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)));
+    max_rows(list, BLOCK_MAX_ROWS)
 }
 
 fn indent(e: Element<'static, Message>) -> Element<'static, Message> {
@@ -362,11 +371,9 @@ impl App {
         for t in rows {
             list = list.push(tab_row(t, &q));
         }
-        // Many tabs must not push the tree off screen: past this height the
-        // block scrolls on its own.
-        let list = scrollable(list)
-            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)));
-        Some(container(list).max_height(OPEN_LIST_MAX_HEIGHT).into())
+        // Many tabs must not push the tree off screen: past this many rows
+        // the block scrolls on its own.
+        Some(block_scroll(list))
     }
 
     /// Pinned sessions, in pin order, above the OPEN block. Like OPEN it
@@ -375,6 +382,9 @@ impl App {
     /// session is listed or none matches the search.
     fn pinned_list(&self, tabs: &[TabRow]) -> Option<Element<'static, Message>> {
         let q = self.search.to_lowercase();
+        // Pins open in a tab come first, so the ones in use are always in
+        // view; then the closed ones. Each part keeps the pin order.
+        let mut open_rows = Vec::new();
         let mut rows = Vec::new();
         for pin in &self.pinned {
             let open = tabs.iter().find(|t| match pin {
@@ -384,7 +394,7 @@ impl App {
             match (open, pin) {
                 (Some(t), _) => {
                     if self.tab_matches(t, &q) {
-                        rows.push(tab_row(t, &q));
+                        open_rows.push(tab_row(t, &q));
                     }
                 }
                 (None, Pin::Session(sid)) => {
@@ -399,16 +409,14 @@ impl App {
                 }
             }
         }
-        if rows.is_empty() {
+        if open_rows.is_empty() && rows.is_empty() {
             return None;
         }
         let mut list = column![section("PINNED")].spacing(2).width(Length::Fill);
-        for r in rows {
+        for r in open_rows.into_iter().chain(rows) {
             list = list.push(r);
         }
-        let list = scrollable(list)
-            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(2)));
-        Some(container(list).max_height(PINNED_LIST_MAX_HEIGHT).into())
+        Some(block_scroll(list))
     }
 
     /// A pinned terminal whose tab is closed: click to open it, ✕ to unpin.

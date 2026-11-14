@@ -4,6 +4,7 @@
 mod accounts;
 mod detail;
 mod ellipsis;
+mod max_rows;
 mod sidebar;
 mod notify;
 mod workspaces;
@@ -61,11 +62,9 @@ const DEFAULT_WORKSPACE: &str = "Default";
 
 /// Left indent of rows inside a workspace, so the sidebar reads as a tree.
 const TREE_INDENT: f32 = 16.0;
-/// Past this height the OPEN block in the sidebar scrolls on its own, so
-/// many open tabs never hide the session tree below it.
-const OPEN_LIST_MAX_HEIGHT: f32 = 360.0;
-/// Past this height the PINNED block scrolls on its own, for the same reason.
-const PINNED_LIST_MAX_HEIGHT: f32 = 240.0;
+/// Past this many rows the PINNED and OPEN blocks in the sidebar scroll on
+/// their own, so many pins or open tabs never hide the session tree below.
+const BLOCK_MAX_ROWS: usize = 10;
 
 /// Text size of sidebar rows. The session detail view uses it too, so both read the same.
 const TEXT_SIZE: u32 = 16;
