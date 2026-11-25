@@ -250,8 +250,13 @@ Stored in the per-OS data folder (`directories` crate):
 
 1. The user clicks a session with status ○.
 2. The app creates a PTY sized to the terminal area.
-3. The command runs **through the user's login shell**, so `PATH` is the same as in a normal terminal:
-   - macOS/Linux: `$SHELL -l -c 'exec claude --resume <id>'`, with `cwd` = the session folder
+3. The command runs **through the user's interactive login shell**, so `PATH` and aliases are the same as in a normal
+   terminal:
+   - macOS/Linux: `$SHELL -l -i -c '<command> --resume <id>'`, with `cwd` = the session folder. `<command>` is the
+     account's command (11.7). If the shell does not know it, `command claude` runs. There is no `exec`, because it
+     would skip the alias; zsh replaces itself with the last command anyway.
+   - For a native install, a hard link named `claude` in `<app data>/bin/<version>/` goes first in `PATH`, so the
+     process shows as `claude` (not the version number) in Activity Monitor, even when an alias runs it.
    - Windows: `claude.exe --resume <id>` (found through `PATH`), with `cwd` = the session folder
 4. Environment:
    - Set `TERM=xterm-256color` and `COLORTERM=truecolor`
@@ -322,6 +327,10 @@ Use case: one account hits its usage limit, and the user continues the same sess
 2. **Launch.** Claude runs with `CLAUDE_CONFIG_DIR=<folder>` for an extra account. For the default account the
    variable stays **unset**: Claude keys its saved login by this value, so setting it to `~/.claude` finds no login
    (tested with Claude Code v2.1.300).
+   The command is the folder's name without the dot: `~/.claude` runs `claude`, `~/.claude-pro` runs `claude-pro`.
+   So a shell alias with that name is used, for example one that sets a long-lived `CLAUDE_CODE_OAUTH_TOKEN`
+   (made with `claude setup-token`). An extra account without such an alias runs `command claude`, which skips a
+   `claude` alias: that alias's token is for the default account and would win over the account's own login.
 3. **Adding.** "+" → Accounts → Add account. The app makes the folder (an existing one is used as it is) and opens a
    tab that runs `claude auth login`. "Remove" only forgets the account; its folder stays on disk.
 4. **Sidebar.** One list for all accounts. Rows of an extra account show its name as a small tag. A new session
@@ -420,7 +429,7 @@ app/                         (repo)
 |---|---|---|---|
 | PTY | Unix PTY | ConPTY (Windows 10 1809+) | Unix PTY |
 | Session folder | `~/.claude` | `%USERPROFILE%\.claude` | `~/.claude` |
-| Command | through `$SHELL -l -c` | `claude.exe` directly | through `$SHELL -l -c` |
+| Command | through `$SHELL -l -i -c` | `claude.exe` directly | through `$SHELL -l -i -c` |
 | Release package | `.dmg` (signed + notarized) | `.msi` (signed if a certificate is available) | AppImage + `.deb` |
 | Start on login | LaunchAgent | Registry Run key | `.desktop` in autostart |
 
